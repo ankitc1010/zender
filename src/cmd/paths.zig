@@ -142,7 +142,8 @@ test "resolveOutput refuses traversal outside the root" {
     const root_abs = try tmp.dir.realPathFileAlloc(io, "root", arena);
     const roots: Roots = .{ .list = &.{root_abs} };
     const ok = try resolveOutput(io, arena, roots, "sub/out.glb");
-    try std.testing.expect(std.mem.endsWith(u8, ok, "/root/sub/out.glb"));
+    const sep = std.fs.path.sep_str;
+    try std.testing.expect(std.mem.endsWith(u8, ok, sep ++ "root" ++ sep ++ "sub" ++ sep ++ "out.glb"));
     try std.testing.expectError(error.OutsideRoots, resolveOutput(io, arena, roots, "../escape.glb"));
     // An absolute path into a sibling whose name starts with the root's.
     try tmp.dir.createDirPath(io, "rooted");
