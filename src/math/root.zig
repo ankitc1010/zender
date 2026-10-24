@@ -1,0 +1,17 @@
+//! Platform layer (layer 5): math, triangulation and the shared parallel pool.
+//! Imports nothing but std.
+
+pub const vec = @import("vec.zig");
+pub const triangulate = @import("triangulate.zig");
+pub const Pool = @import("pool.zig").Pool;
+
+pub const Vec3 = vec.Vec3;
+pub const Vec4 = vec.Vec4;
+pub const Quat = vec.Quat;
+pub const Mat4 = vec.Mat4;
+
+test {
+    _ = vec;
+    _ = triangulate;
+    _ = @import("pool.zig");
+}

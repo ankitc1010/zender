@@ -1,0 +1,10 @@
+Zender
+Copyright 2026 Ankit Chauhan
+
+This product is an independent implementation. It contains no code copied,
+translated or paraphrased from Blender's GPL-licensed sources. It reads and
+writes Blender-compatible data using the format's own self-describing
+structure definitions, which are interoperability data.
+
+Code adapted from Apache-2.0 projects (for example Cycles) is listed below
+with its original copyright notice. None so far.

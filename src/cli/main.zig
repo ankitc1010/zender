@@ -1,0 +1,215 @@
+//! zender command line (TRD §11). Every subcommand goes through the same
+//! command core as MCP, so a CLI run and an agent session produce the same
+//! command-log entries and outputs.
+//!
+//! Exit codes (FR-CLI-3): 0 success, 1 user error, 2 I/O error, 3 internal.
+
+const std = @import("std");
+const cmd = @import("cmd");
+const mcp = @import("mcp");
+const math = @import("math");
+
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
+
+const usage =
+    \\zender — headless 3D scene engine driven over MCP
+    \\
+    \\usage:
+    \\  zender serve --stdio [options]      MCP server on stdin/stdout (MCP 2026-07-28; 2025-11-25 initialize accepted)
+    \\  zender run <ops.jsonl> -o <out>     replay a command log; write .glb, .gltf or .png
+    \\  zender tools [--json]               list the tools
+    \\  zender version
+    \\
+    \\options:
+    \\  --allow-root <dir>   directory tools may read and write (repeatable; default: current directory)
+    \\  --threads <n>        worker threads for rendering (default: CPU count)
+    \\  --content <mode>     MCP tool result content: full (summary + JSON, default) or summary
+    \\  --json               machine-readable output (run, tools)
+    \\  --width/--height <px>  size of a .png written by run
+    \\
+;
+
+const Exit = enum(u8) { ok = 0, user = 1, io = 2, internal = 3 };
+
+const Options = struct {
+    command: []const u8 = "",
+    positional: std.ArrayList([]const u8) = .empty,
+    roots: std.ArrayList([]const u8) = .empty,
+    output: ?[]const u8 = null,
+    threads: ?usize = null,
+    json: bool = false,
+    stdio: bool = false,
+    content: mcp.protocol.ContentMode = .full,
+    width: ?u32 = null,
+    height: ?u32 = null,
+};
+
+pub fn main(init: std.process.Init) u8 {
+    const code = run(init) catch |e| {
+        std.debug.print("zender: internal error: {t}\n", .{e});
+        return @intFromEnum(Exit.internal);
+    };
+    return @intFromEnum(code);
+}
+
+fn fail(comptime fmt: []const u8, args: anytype) Exit {
+    std.debug.print("zender: " ++ fmt ++ "\n", args);
+    return .user;
+}
+
+fn run(init: std.process.Init) !Exit {
+    const gpa = init.gpa;
+    const io = init.io;
+    const arena = init.arena.allocator();
+
+    var opts: Options = .{};
+    var it = init.minimal.args.iterate();
+    _ = it.next(); // program name
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--allow-root")) {
+            try opts.roots.append(arena, it.next() orelse return fail("--allow-root needs a directory", .{}));
+        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            opts.output = it.next() orelse return fail("-o needs a path", .{});
+        } else if (std.mem.eql(u8, arg, "--threads")) {
+            const v = it.next() orelse return fail("--threads needs a number", .{});
+            opts.threads = std.fmt.parseInt(usize, v, 10) catch return fail("--threads: '{s}' is not a number", .{v});
+            if (opts.threads.? == 0 or opts.threads.? > 1024) return fail("--threads must be 1..1024", .{});
+        } else if (std.mem.eql(u8, arg, "--width") or std.mem.eql(u8, arg, "--height")) {
+            const v = it.next() orelse return fail("{s} needs a number", .{arg});
+            const n = std.fmt.parseInt(u32, v, 10) catch return fail("{s}: '{s}' is not a number", .{ arg, v });
+            if (arg[2] == 'w') opts.width = n else opts.height = n;
+        } else if (std.mem.eql(u8, arg, "--content")) {
+            const v = it.next() orelse return fail("--content needs full or summary", .{});
+            opts.content = std.meta.stringToEnum(mcp.protocol.ContentMode, v) orelse return fail("--content must be full or summary", .{});
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            opts.json = true;
+        } else if (std.mem.eql(u8, arg, "--stdio")) {
+            opts.stdio = true;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try writeStdout(io, usage);
+            return .ok;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return fail("unknown option '{s}' (see zender --help)", .{arg});
+        } else if (opts.command.len == 0) {
+            opts.command = arg;
+        } else {
+            try opts.positional.append(arena, arg);
+        }
+    }
+
+    if (opts.command.len == 0) {
+        try writeStdout(io, usage);
+        return .user;
+    }
+    if (std.mem.eql(u8, opts.command, "version")) {
+        try writeStdout(io, "zender " ++ cmd.version ++ "\n");
+        return .ok;
+    }
+
+    if (opts.roots.items.len == 0) try opts.roots.append(arena, ".");
+    const roots = cmd.paths.Roots.init(io, arena, opts.roots.items) catch |e| {
+        return fail("cannot use --allow-root: {t}", .{e});
+    };
+    var pool = math.Pool.init(io);
+    if (opts.threads) |t| pool.threads = t;
+    var server = cmd.Server.init(gpa, io, pool, .{ .roots = roots }, cmd.catalog.tools);
+    defer server.deinit();
+
+    if (std.mem.eql(u8, opts.command, "serve")) {
+        if (!opts.stdio) return fail("serve needs --stdio (Streamable HTTP arrives in P3)", .{});
+        std.debug.print("zender {s}: MCP on stdio, roots:", .{cmd.version});
+        for (roots.list) |r| std.debug.print(" {s}", .{r});
+        std.debug.print(", {d} threads\n", .{pool.threads});
+        var session: mcp.Session = .{ .server = &server, .content = opts.content };
+        try mcp.stdio.serve(io, gpa, &session);
+        return .ok;
+    }
+    if (std.mem.eql(u8, opts.command, "tools")) return listTools(io, arena, &server, opts.json);
+    if (std.mem.eql(u8, opts.command, "run")) return replayLog(io, arena, &server, &opts);
+    if (std.mem.eql(u8, opts.command, "convert") or std.mem.eql(u8, opts.command, "inspect") or
+        std.mem.eql(u8, opts.command, "render") or std.mem.eql(u8, opts.command, "validate"))
+    {
+        return fail("'{s}' needs file importers, which arrive with .blend and glTF reading (P1/P2)", .{opts.command});
+    }
+    return fail("unknown command '{s}' (see zender --help)", .{opts.command});
+}
+
+fn writeStdout(io: Io, bytes: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = Io.File.stdout().writerStreaming(io, &buf);
+    try w.interface.writeAll(bytes);
+    try w.interface.flush();
+}
+
+fn listTools(io: Io, arena: Allocator, server: *cmd.Server, json: bool) !Exit {
+    var out: std.Io.Writer.Allocating = .init(arena);
+    if (json) {
+        var w: std.json.Stringify = .{ .writer = &out.writer };
+        try w.beginArray();
+        for (server.tools) |t| {
+            try w.beginObject();
+            try w.objectField("name");
+            try w.write(t.name);
+            try w.objectField("description");
+            try w.write(t.description);
+            try w.objectField("inputSchema");
+            try cmd.schema.writeInputSchema(t.params, &w);
+            try w.endObject();
+        }
+        try w.endArray();
+        try out.writer.writeByte('\n');
+    } else {
+        for (server.tools) |t| try out.writer.print("{s:<24} {s}\n", .{ t.name, t.title });
+    }
+    try writeStdout(io, out.written());
+    return .ok;
+}
+
+fn replayLog(io: Io, arena: Allocator, server: *cmd.Server, opts: *const Options) !Exit {
+    if (opts.positional.items.len != 1) return fail("run needs exactly one command log (ops.jsonl)", .{});
+    const path = opts.positional.items[0];
+    const log = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |e| {
+        std.debug.print("zender: cannot read '{s}': {t}\n", .{ path, e });
+        return .io;
+    };
+    const r = try cmd.replay.run(server, arena, log);
+    if (r.failed_line != 0) {
+        std.debug.print("zender: {s}:{d}: {s}\n", .{ path, r.failed_line, r.message });
+        return .user;
+    }
+
+    var output_json: []const u8 = "null";
+    if (opts.output) |out_path| {
+        const ext = std.fs.path.extension(out_path);
+        var args: std.json.ObjectMap = .empty;
+        try args.put(arena, "scene_id", .{ .string = r.scene_id });
+        try args.put(arena, "path", .{ .string = out_path });
+        try args.put(arena, "overwrite", .{ .bool = true });
+        const tool = if (std.ascii.eqlIgnoreCase(ext, ".png")) blk: {
+            if (opts.width) |w| try args.put(arena, "width", .{ .integer = w });
+            if (opts.height) |h| try args.put(arena, "height", .{ .integer = h });
+            break :blk "render.preview";
+        } else "io.export";
+        const outcome = try server.call(arena, tool, .{ .object = args });
+        switch (outcome) {
+            .ok => |ok| {
+                output_json = ok.structured;
+                if (!opts.json) std.debug.print("{s}\n", .{ok.summary});
+            },
+            .tool_error => |te| {
+                std.debug.print("zender: {s}: {s}\n", .{ @tagName(te.code), te.message });
+                return if (te.code == .io_error or te.code == .permission_denied or te.code == .not_found) .io else .user;
+            },
+            .unknown_tool => unreachable,
+        }
+    }
+    if (opts.json) {
+        var out: std.Io.Writer.Allocating = .init(arena);
+        try out.writer.print("{{\"ok\":true,\"steps\":{d},\"scene_id\":\"{s}\",\"output\":{s}}}\n", .{ r.steps, r.scene_id, output_json });
+        try writeStdout(io, out.written());
+    } else {
+        std.debug.print("Replayed {d} step(s).\n", .{r.steps});
+    }
+    return .ok;
+}
