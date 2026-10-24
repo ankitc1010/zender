@@ -13,7 +13,10 @@ Requires Zig 0.16.0.
 ```sh
 zig build            # zig-out/bin/zender (ReleaseSafe)
 zig build test       # unit and integration tests
+zig build test-compile -Dtarget=x86_64-windows-gnu   # build tests for another target without running them
 ```
+
+CI (`.github/workflows/ci.yml`) checks formatting and cross-compiles the CLI and tests for Linux (x86-64, arm64), macOS (arm64, x86-64) and Windows (x86-64). It then runs the tests natively on Linux x86-64 and arm64, macOS and Windows, replays `examples/dining.jsonl`, checks the MCP handshake over stdio, and validates the exported glTF with the Khronos validator.
 
 ## Use with an MCP client
 

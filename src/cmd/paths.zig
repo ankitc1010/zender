@@ -3,7 +3,10 @@
 //! --allow-root. Relative paths are taken relative to the first root.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
+
+const windows = builtin.os.tag == .windows;
 const Allocator = std.mem.Allocator;
 
 pub const Roots = struct {
@@ -19,13 +22,21 @@ pub const Roots = struct {
 
     pub fn contains(r: Roots, abs: []const u8) bool {
         for (r.list) |root| {
-            if (std.mem.eql(u8, abs, root)) return true;
-            if (std.mem.eql(u8, root, "/")) return true;
-            if (abs.len > root.len and std.mem.startsWith(u8, abs, root) and abs[root.len] == '/') return true;
+            if (root.len == 0 or abs.len < root.len) continue;
+            // NTFS paths compare case-insensitively.
+            const prefix_ok = if (windows) std.ascii.eqlIgnoreCase(abs[0..root.len], root) else std.mem.eql(u8, abs[0..root.len], root);
+            if (!prefix_ok) continue;
+            if (abs.len == root.len) return true;
+            // A root like "/" or "C:\" already ends in a separator.
+            if (isSep(root[root.len - 1]) or isSep(abs[root.len])) return true;
         }
         return false;
     }
 };
+
+fn isSep(c: u8) bool {
+    return c == '/' or (windows and c == '\\');
+}
 
 pub const PathError = error{
     OutsideRoots,
@@ -109,7 +120,7 @@ pub fn writeFileAtomic(io: Io, abs: []const u8, bytes: []const u8, overwrite: bo
     // An O_TMPFILE file can come out 0600 (seen under proot), and fchmod on
     // it before linking does not stick there; outputs are ordinary files, so
     // give them the usual rw-r--r-- once they have a name.
-    dir.setFilePermissions(io, base, .fromMode(0o644), .{}) catch {};
+    if (!windows) dir.setFilePermissions(io, base, .fromMode(0o644), .{}) catch {};
 }
 
 test "roots contain only paths under them" {
@@ -133,7 +144,10 @@ test "resolveOutput refuses traversal outside the root" {
     const ok = try resolveOutput(io, arena, roots, "sub/out.glb");
     try std.testing.expect(std.mem.endsWith(u8, ok, "/root/sub/out.glb"));
     try std.testing.expectError(error.OutsideRoots, resolveOutput(io, arena, roots, "../escape.glb"));
-    try std.testing.expectError(error.OutsideRoots, resolveOutput(io, arena, roots, "/etc/passwd"));
+    // An absolute path into a sibling whose name starts with the root's.
+    try tmp.dir.createDirPath(io, "rooted");
+    const outside = try std.fs.path.join(arena, &.{ try tmp.dir.realPathFileAlloc(io, "rooted", arena), "x.glb" });
+    try std.testing.expectError(error.OutsideRoots, resolveOutput(io, arena, roots, outside));
     try std.testing.expectError(error.NotFound, resolveOutput(io, arena, roots, "missing/dir/x.glb"));
     try writeFileAtomic(io, ok, "abc", false);
     try std.testing.expectError(error.AlreadyExists, writeFileAtomic(io, ok, "abc", false));
@@ -141,6 +155,10 @@ test "resolveOutput refuses traversal outside the root" {
 }
 
 test "written files are readable by others" {
+    if (windows) return error.SkipZigTest else try checkWrittenMode();
+}
+
+fn checkWrittenMode() !void {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

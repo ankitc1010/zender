@@ -78,10 +78,13 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run zender").dependOn(&run.step);
 
-    // Unit tests: every module's `test` blocks.
+    // Unit tests: every module's `test` blocks. test-compile only builds
+    // them, so CI can check foreign targets it cannot run.
     const test_step = b.step("test", "Run unit tests");
-    for (modules) |m| {
-        const t = b.addTest(.{ .root_module = m });
+    const test_compile = b.step("test-compile", "Build unit tests without running them");
+    for (modules, layers) |m, l| {
+        const t = b.addTest(.{ .name = b.fmt("test-{s}", .{l.name}), .root_module = m });
         test_step.dependOn(&b.addRunArtifact(t).step);
+        test_compile.dependOn(&b.addInstallArtifact(t, .{}).step);
     }
 }

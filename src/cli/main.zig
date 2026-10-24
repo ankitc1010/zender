@@ -64,7 +64,8 @@ fn run(init: std.process.Init) !Exit {
     const arena = init.arena.allocator();
 
     var opts: Options = .{};
-    var it = init.minimal.args.iterate();
+    // The allocating iterator also works on Windows.
+    var it = try init.minimal.args.iterateAllocator(arena);
     _ = it.next(); // program name
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--allow-root")) {

@@ -1,0 +1,68 @@
+# CI as in TRD §14: one Linux runner checks formatting and cross-compiles
+# every target (CLI and tests); each Tier 1 platform then runs the tests
+# natively and smoke-tests the binary.
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig fmt --check build.zig src
+      - name: Cross-compile CLI and tests
+        run: |
+          for t in x86_64-linux-musl aarch64-linux-musl aarch64-macos x86_64-macos x86_64-windows-gnu; do
+            echo "::group::$t"
+            zig build install test-compile -Dtarget=$t --prefix out/$t
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zender-${{ github.sha }}
+          path: out/*/bin/zender*
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build test --summary all
+      - run: zig build
+      - name: Replay the example command log
+        run: |
+          ./zig-out/bin/zender run examples/dining.jsonl -o dining.glb
+          ./zig-out/bin/zender run examples/dining.jsonl -o dining.gltf
+          ./zig-out/bin/zender run examples/dining.jsonl -o dining.png --width 320
+          test "$(head -c 4 dining.glb)" = "glTF"
+      - name: MCP handshake over stdio
+        run: |
+          meta='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+          printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$meta}}" \
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{$meta}}" \
+            | ./zig-out/bin/zender serve --stdio > out.jsonl
+          grep -q '"supportedVersions":\["2026-07-28"' out.jsonl
+          grep -q '"name":"render.preview"' out.jsonl
+      - uses: actions/setup-node@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          node-version: 22
+      - name: Khronos glTF validator
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/validator" gltf-validator@2.0.0-dev.3.10
+          node scripts/validate-gltf.mjs "$RUNNER_TEMP/validator/node_modules" dining.glb dining.gltf
