@@ -7,7 +7,7 @@
 // Prints a table per directory and appends it to $GITHUB_STEP_SUMMARY when
 // set. With --min, exits 1 if any directory is below that percentage.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 
 const argv = process.argv.slice(2);
@@ -21,6 +21,7 @@ const dirs = ['core', 'geom', 'io'];
 const dirPaths = dirs.map((d) => join(root, 'src', d) + sep);
 
 rmSync(out, { recursive: true, force: true });
+mkdirSync(out, { recursive: true }); // kcov creates only the last directory
 execFileSync('zig', ['build', 'test-compile', '-Doptimize=Debug', '--prefix', prefix], { stdio: 'inherit' });
 const bins = readdirSync(join(prefix, 'bin')).filter((f) => f.startsWith('test-')).sort();
 for (const b of bins) {

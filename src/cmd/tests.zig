@@ -269,9 +269,11 @@ test "tool calls become spans that continue the caller's trace" {
     defer f.deinit();
     const arena = f.arena_state.allocator();
     const root = try f.tmp.dir.realPathFileAlloc(testing.io, ".", arena);
+    const path = try std.fs.path.join(arena, &.{ root, "spans.jsonl" });
     var tel: telemetry.Telemetry = .{ .io = testing.io, .version = "test" };
-    try tel.openTraceFile(try std.fs.path.join(arena, &.{ root, "spans.jsonl" }));
-    defer tel.deinit();
+    try tel.openTraceFile(path);
+    var tel_open = true;
+    defer if (tel_open) tel.deinit();
     f.server.config.telemetry = &tel;
 
     const parent = telemetry.TraceContext.parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "").?;
@@ -280,7 +282,16 @@ test "tool calls become spans that continue the caller's trace" {
     const failed = try f.server.callTraced(arena, "object.delete", try std.json.parseFromSliceLeaky(Value, arena, try f.fmt("{{\"scene_id\":\"{s}\",\"objects\":[\"Nope\"]}}", .{id}), .{}), null);
     try testing.expect(failed == .tool_error);
 
-    const text = try f.tmp.dir.readFileAlloc(testing.io, "spans.jsonl", arena, .limited(1 << 20));
+    // Close the trace file before reading it back, and show what it held if
+    // a check below fails.
+    f.server.config.telemetry = null;
+    tel.deinit();
+    tel_open = false;
+    const text = f.tmp.dir.readFileAlloc(testing.io, "spans.jsonl", arena, .limited(1 << 20)) catch |e| {
+        std.debug.print("cannot read back {s}: {t}\n", .{ path, e });
+        return e;
+    };
+    errdefer std.debug.print("{s} ({d} bytes):\n{s}\n", .{ path, text.len, text });
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     var spans: [2]std.json.ObjectMap = undefined;
     for (&spans) |*sp| {
