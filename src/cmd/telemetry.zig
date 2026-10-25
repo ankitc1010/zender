@@ -90,7 +90,9 @@ pub const Telemetry = struct {
 
     /// Opens `path` for appending spans.
     pub fn openTraceFile(t: *Telemetry, path: []const u8) !void {
-        const f = try Io.Dir.cwd().createFile(t.io, path, .{ .truncate = false });
+        // Read access too: on Windows, reading the length of a write-only
+        // handle is refused (it lacks FILE_READ_ATTRIBUTES).
+        const f = try Io.Dir.cwd().createFile(t.io, path, .{ .truncate = false, .read = true });
         t.trace_offset = try f.length(t.io);
         t.trace_file = f;
     }

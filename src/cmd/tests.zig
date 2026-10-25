@@ -271,7 +271,10 @@ test "tool calls become spans that continue the caller's trace" {
     const root = try f.tmp.dir.realPathFileAlloc(testing.io, ".", arena);
     const path = try std.fs.path.join(arena, &.{ root, "spans.jsonl" });
     var tel: telemetry.Telemetry = .{ .io = testing.io, .version = "test" };
-    try tel.openTraceFile(path);
+    tel.openTraceFile(path) catch |e| {
+        std.debug.print("cannot open {s}: {t}\n", .{ path, e });
+        return e;
+    };
     var tel_open = true;
     defer if (tel_open) tel.deinit();
     f.server.config.telemetry = &tel;
