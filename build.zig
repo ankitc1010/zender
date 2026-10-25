@@ -40,6 +40,9 @@ pub fn build(b: *std.Build) void {
     // single-threaded (TRD §14): no executable, and tests stop below the
     // command core, which needs a full file system and process model.
     const core_only = target.result.cpu.arch.isWasm();
+    // Coverage tools read LLVM's debug info; Zig's own x86-64 backend, the
+    // Debug default there, gives kcov nothing to map.
+    const use_llvm = b.option(bool, "use-llvm", "Compile tests with the LLVM backend");
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
@@ -89,7 +92,7 @@ pub fn build(b: *std.Build) void {
     const test_compile = b.step("test-compile", "Build unit tests without running them");
     for (modules, layers) |m, l| {
         if (core_only and l.level > 3) continue;
-        const t = b.addTest(.{ .name = b.fmt("test-{s}", .{l.name}), .root_module = m });
+        const t = b.addTest(.{ .name = b.fmt("test-{s}", .{l.name}), .root_module = m, .use_llvm = use_llvm });
         const run_t = if (core_only) blk: {
             // Node's built-in WASI runs them, so no wasm runtime is needed.
             const r = b.addSystemCommand(&.{ "node", "--no-warnings" });
@@ -111,6 +114,7 @@ pub fn build(b: *std.Build) void {
         golden_opts.addOption(bool, "update", b.option(bool, "update-golden", "Rewrite tests/golden from the current output") orelse false);
         const t = b.addTest(.{
             .name = "test-golden",
+            .use_llvm = use_llvm,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/golden/root.zig"),
                 .target = target,

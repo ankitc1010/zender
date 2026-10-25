@@ -22,7 +22,7 @@ const dirPaths = dirs.map((d) => join(root, 'src', d) + sep);
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true }); // kcov creates only the last directory
-execFileSync('zig', ['build', 'test-compile', '-Doptimize=Debug', '--prefix', prefix], { stdio: 'inherit' });
+execFileSync('zig', ['build', 'test-compile', '-Doptimize=Debug', '-Duse-llvm=true', '--prefix', prefix], { stdio: 'inherit' });
 const bins = readdirSync(join(prefix, 'bin')).filter((f) => f.startsWith('test-')).sort();
 for (const b of bins) {
   execFileSync('kcov', [`--include-path=${dirPaths.join(',')}`, join(out, b), join(prefix, 'bin', b)], { stdio: 'inherit' });
@@ -42,7 +42,13 @@ function summarize(report) {
   return rows;
 }
 
-const rows = summarize(JSON.parse(readFileSync(join(out, 'merged', 'kcov-merged', 'coverage.json'), 'utf8')));
+const report = JSON.parse(readFileSync(join(out, 'merged', 'kcov-merged', 'coverage.json'), 'utf8'));
+// No files at all means kcov could not map the binaries, not 0% coverage.
+if (report.files.length === 0) {
+  console.error('kcov recorded no source files; check that the test binaries carry DWARF it can read');
+  process.exit(1);
+}
+const rows = summarize(report);
 const lines = ['| Directory | Files | Lines covered | Coverage |', '| --- | ---: | ---: | ---: |'];
 for (const r of rows) lines.push(`| ${r.dir} | ${r.files} | ${r.covered} / ${r.total} | ${r.percent.toFixed(1)}% |`);
 const table = `### Line coverage (target 85%)\n\n${lines.join('\n')}\n`;
