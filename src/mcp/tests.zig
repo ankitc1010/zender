@@ -76,8 +76,9 @@ test "discover, tools/list size and version checks" {
 
     const arena = h.arena_state.allocator();
     const raw = (try h.session.handle(arena, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{" ++ meta ++ "}}")).?;
-    // FR-MCP-9: the whole tool list stays under 40 KB.
-    try testing.expect(raw.len <= 40 * 1024);
+    // FR-MCP-9 asks for 40 KB; the project owner raised the hard cap to
+    // 60 KB on 2026-10-25 so P1's tools fit. 40 KB stays the aim.
+    try testing.expect(raw.len <= 60 * 1024);
     const tl = try std.json.parseFromSliceLeaky(Value, arena, raw, .{});
     const tools = result(tl).get("tools").?.array.items;
     try testing.expect(tools.len >= 20);

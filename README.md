@@ -110,7 +110,7 @@ Measured on a phone (MediaTek Dimensity 9400, 8 cores, ReleaseSafe). The TRD's t
 | Non-geometry tool on a 1.3 M-triangle scene | 2–5 ms | ≤ 20 ms p95 |
 | `render.preview` 512×512, 1.3 M triangles | 140 ms first, ~84 ms after | ≤ 150 ms for 1 M |
 | Binary size (ReleaseSafe, not stripped) | 6.5 MB | ≤ 30 MB |
-| `tools/list` payload | 37.8 KB | ≤ 40 KB |
+| `tools/list` payload | 37.8 KB | ≤ 40 KB (hard cap raised to 60 KB) |
 | Idle RSS (`scripts/measure-memory.mjs`) | 1.5 MB | ≤ 30 MB |
 | RSS over mesh bytes, 1 M-triangle scene after a preview | 1.55× | ≤ 2.5× |
 
