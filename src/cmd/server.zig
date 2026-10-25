@@ -8,6 +8,7 @@ const math = @import("math");
 const engine = @import("engine");
 const schema = @import("schema.zig");
 const paths = @import("paths.zig");
+const telemetry = @import("telemetry.zig");
 const build_options = @import("build_options");
 
 const Allocator = std.mem.Allocator;
@@ -37,6 +38,8 @@ pub const Config = struct {
     budgets: Budgets = .{},
     /// Renders kept per scene for resource reads.
     max_renders: usize = 8,
+    /// Spans and log lines per call; null records nothing.
+    telemetry: ?*telemetry.Telemetry = null,
 };
 
 pub const Image = struct { mime: []const u8, bytes: []const u8 };
@@ -164,7 +167,11 @@ pub const Call = struct {
     /// The scene evaluated to interchange form, reusing cached results.
     pub fn evaluate(c: *Call) HandlerError!engine.ir.Scene {
         const e = c.entry.?;
-        return engine.eval.flatten.flatten(c.arena, &e.doc, .{ .pool = c.server.pool, .cache = &e.eval_cache });
+        return engine.eval.flatten.flatten(c.arena, &e.doc, .{ .pool = c.server.pool, .cache = &e.eval_cache }) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            // Past the wall-time budget; callInner reports it.
+            error.DeadlineExceeded => error.ToolFailed,
+        };
     }
 
     pub fn fail(c: *Call, code: ErrorCode, comptime fmt: []const u8, args: anytype) HandlerError {
@@ -305,11 +312,43 @@ pub const Server = struct {
 
     /// Runs one tool call. `arena` owns everything in the outcome.
     pub fn call(s: *Server, arena: Allocator, name: []const u8, raw_args: ?Value) Allocator.Error!Outcome {
+        return s.callTraced(arena, name, raw_args, null);
+    }
+
+    /// `call`, continuing the caller's trace (FR-MCP-3).
+    pub fn callTraced(s: *Server, arena: Allocator, name: []const u8, raw_args: ?Value, parent: ?telemetry.TraceContext) Allocator.Error!Outcome {
         const tool = s.findTool(name) orelse return .unknown_tool;
         var changed: std.ArrayList(Ref) = .empty;
         var created: std.ArrayList(Ref) = .empty;
         var warnings: std.ArrayList([]const u8) = .empty;
-        return s.callInner(arena, tool, raw_args, &changed, &created, &warnings, null);
+        const t = s.config.telemetry orelse return s.callInner(arena, tool, raw_args, &changed, &created, &warnings, null);
+
+        const span = t.startSpan(parent);
+        const start_ns = t.now();
+        const out = try s.callInner(arena, tool, raw_args, &changed, &created, &warnings, null);
+        var rec: telemetry.CallRecord = .{ .tool = tool.name, .start_ns = start_ns, .end_ns = t.now(), .parent = parent };
+        switch (out) {
+            .ok => |ok| if (std.mem.eql(u8, tool.name, "scene.create")) {
+                // The new scene's id exists only in the result.
+                const v = std.json.parseFromSliceLeaky(Value, arena, ok.structured, .{}) catch null;
+                if (v) |x| if (x.object.get("scene_id")) |id| if (id == .string) {
+                    rec.scene_id = id.string;
+                };
+            },
+            .tool_error => |te| {
+                rec.error_code = @tagName(te.code);
+                rec.error_message = te.message;
+            },
+            .unknown_tool => {},
+        }
+        if (rec.scene_id == null) if (raw_args) |a| if (a == .object) if (a.object.get("scene_id")) |id| if (id == .string) {
+            rec.scene_id = id.string;
+        };
+        if (rec.scene_id) |id| if (s.scenes.get(id)) |e| {
+            rec.scene_rev = e.doc.rev;
+        };
+        t.recordCall(arena, span, rec);
+        return out;
     }
 
     fn callInner(
@@ -354,6 +393,16 @@ pub const Server = struct {
             }
         };
 
+        // The wall-time budget (SEC-3) covers the whole call, batch included:
+        // parallel loops stop at the deadline and scene.apply checks it
+        // between ops.
+        var deadline = math.Deadline.after(s.io, s.config.budgets.max_wall_ms);
+        const top_level = batch_entry == null;
+        if (top_level) s.pool.deadline = &deadline;
+        defer if (top_level) {
+            s.pool.deadline = null;
+        };
+
         var out_buf: std.Io.Writer.Allocating = .init(arena);
         var c: Call = .{
             .server = s,
@@ -374,7 +423,18 @@ pub const Server = struct {
         var tx: ?core.Transaction = if (transact) try core.Transaction.begin(&entry.?.doc) else null;
         defer if (tx) |*t| t.end();
 
-        tool.handler(&c) catch |e| switch (e) {
+        const handled = tool.handler(&c);
+        if (top_level and deadline.expired()) {
+            // Some loop stopped early: its output, and anything cached from
+            // it, is incomplete. The transaction rolls back on return.
+            if (c.entry) |e| e.eval_cache.clear();
+            return .{ .tool_error = .{
+                .code = .budget_exceeded,
+                .message = try std.fmt.allocPrint(arena, "the call ran past the {d} ms wall-time budget and was stopped; nothing changed", .{s.config.budgets.max_wall_ms}),
+                .hint = "ask for less work (a smaller render, fewer segments, fewer ops), or ask the operator to raise --max-wall-ms",
+            } };
+        }
+        handled catch |e| switch (e) {
             error.ToolFailed => return .{ .tool_error = c.err orelse .{ .code = .internal, .message = "tool failed" } },
             error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
         };
@@ -418,6 +478,7 @@ pub const Server = struct {
         try c.field("results");
         try c.out.beginArray();
         for (ops, 0..) |op, i| {
+            if (s.pool.deadline) |d| if (d.passed(s.io)) return error.ToolFailed; // callInner reports it
             const name = op.object.get("tool").?.string;
             const tool = s.findTool(name) orelse {
                 return c.failAt(.invalid_argument, try std.fmt.allocPrint(c.arena, "/ops/{d}/tool", .{i}), "only mutating tools may appear in scene.apply", try s.mutatingToolNames(c.arena), "op {d}: unknown tool '{s}'", .{ i, name });
@@ -579,7 +640,17 @@ pub fn writeValue(w: *Stringify, v: Value) Stringify.Error!void {
 }
 
 /// Bytes held by mesh buffers in the live database.
-fn sceneBytes(doc: *Document) u64 {
+/// The scene as canonical scene.json, mesh arrays as digests (FR-DM-8).
+pub fn canonicalJson(arena: Allocator, e: *SceneEntry) Allocator.Error![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(arena);
+    var w: Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_1 } };
+    core.canonical.write(arena, &e.doc, &w, .{}) catch return error.OutOfMemory;
+    return out.written();
+}
+
+/// Bytes in the scene's array buffers (meshes, collection lists); a buffer
+/// shared by two datablocks counts twice. Undo history is not included.
+pub fn sceneBytes(doc: *Document) u64 {
     var total: u64 = 0;
     const Ctx = struct {
         fn add(t: *u64, _: usize, size: usize) void {

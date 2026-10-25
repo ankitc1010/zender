@@ -7,6 +7,7 @@ const server_mod = @import("server.zig");
 const catalog = @import("catalog.zig");
 const paths = @import("paths.zig");
 const replay = @import("replay.zig");
+const telemetry = @import("telemetry.zig");
 
 const testing = std.testing;
 const Value = std.json.Value;
@@ -190,4 +191,113 @@ test "renders and exports are identical on 1, 4 and 16 threads" {
         const g = std.hash.Wyhash.hash(0, bytes);
         if (gltf_hash) |p| try testing.expectEqual(p, g) else gltf_hash = g;
     }
+}
+
+test "collections group objects, hide them and undo cleanly" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const v = try f.ok("scene.create", "{\"template\":\"default\"}");
+    const id = v.object.get("scene_id").?.string;
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"plane\",\"name\":\"Floor\",\"size\":10}}", .{id}));
+    const made = try f.ok("collection.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Props\",\"objects\":[\"Cube\"]}}", .{id}));
+    const props = made.object.get("collection").?.object;
+    try testing.expectEqualStrings("Scene Collection", props.get("parent").?.string);
+    try testing.expectEqualStrings("Cube", props.get("objects").?.array.items[0].string);
+    _ = try f.ok("collection.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Inner\",\"parent\":\"Props\"}}", .{id}));
+
+    const cycle = try f.call("collection.update", try f.fmt("{{\"scene_id\":\"{s}\",\"collection\":\"Props\",\"parent\":\"Inner\"}}", .{id}));
+    try testing.expectEqual(server_mod.ErrorCode.invalid_operation, cycle.tool_error.code);
+    try testing.expectEqualStrings("/parent", cycle.tool_error.path);
+    const last = try f.call("collection.update", try f.fmt("{{\"scene_id\":\"{s}\",\"collection\":\"Props\",\"unlink\":[\"Cube\"]}}", .{id}));
+    try testing.expectEqualStrings("/unlink/0", last.tool_error.path);
+    const root = try f.call("collection.update", try f.fmt("{{\"scene_id\":\"{s}\",\"collection\":\"Scene Collection\",\"rename\":\"Root\"}}", .{id}));
+    try testing.expectEqual(server_mod.ErrorCode.invalid_operation, root.tool_error.code);
+
+    // Hiding Props drops the cube from previews and exports.
+    _ = try f.ok("collection.update", try f.fmt("{{\"scene_id\":\"{s}\",\"collection\":\"Props\",\"properties\":{{\"hide_render\":true}}}}", .{id}));
+    const prev = try f.ok("render.preview", try f.fmt("{{\"scene_id\":\"{s}\",\"width\":64,\"height\":48}}", .{id}));
+    for (prev.object.get("visible").?.array.items) |x| try testing.expect(!std.mem.eql(u8, "Cube", x.object.get("object").?.string));
+    const hidden = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"hidden.glb\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 3), hidden.object.get("nodes").?.integer);
+    // A link into a visible collection shows it again.
+    _ = try f.ok("collection.update", try f.fmt("{{\"scene_id\":\"{s}\",\"collection\":\"Scene Collection\",\"link\":[\"Cube\"]}}", .{id}));
+    const shown = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"shown.glb\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 4), shown.object.get("nodes").?.integer);
+
+    const tree = (try f.ok("scene.inspect", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}))).object.get("collections").?.array.items;
+    try testing.expectEqual(@as(usize, 3), tree.len);
+    try testing.expectEqualStrings("Inner", tree[2].object.get("name").?.string);
+    try testing.expect(tree[1].object.get("hide_render").?.bool);
+
+    // Deleting Props hands Inner and the cube to the master; undo restores it.
+    _ = try f.ok("collection.delete", try f.fmt("{{\"scene_id\":\"{s}\",\"collections\":[\"Props\"]}}", .{id}));
+    const flat = (try f.ok("scene.inspect", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}))).object.get("collections").?.array.items;
+    try testing.expectEqual(@as(usize, 2), flat.len);
+    try testing.expectEqualStrings("Scene Collection", flat[1].object.get("parent").?.string);
+    _ = try f.ok("scene.undo", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
+    const back = (try f.ok("scene.inspect", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}))).object.get("collections").?.array.items;
+    try testing.expectEqual(@as(usize, 3), back.len);
+}
+
+test "the wall-time budget stops a call part-way and changes nothing" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = (try f.ok("scene.create", "{\"template\":\"default\"}")).object.get("scene_id").?.string;
+    const b = (try f.ok("scene.create", "{\"template\":\"default\"}")).object.get("scene_id").?.string;
+    f.server.config.budgets.max_wall_ms = 0;
+    const stopped = try f.call("render.preview", try f.fmt("{{\"scene_id\":\"{s}\",\"width\":64,\"height\":48}}", .{a}));
+    try testing.expectEqual(server_mod.ErrorCode.budget_exceeded, stopped.tool_error.code);
+    const batch = try f.call("scene.apply", try f.fmt(
+        \\{{"scene_id":"{s}","ops":[{{"tool":"object.add_primitive","arguments":{{"kind":"cube"}}}}]}}
+    , .{a}));
+    try testing.expectEqual(server_mod.ErrorCode.budget_exceeded, batch.tool_error.code);
+    f.server.config.budgets.max_wall_ms = 60_000;
+    const after = try f.ok("scene.inspect", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{a}));
+    try testing.expectEqual(@as(i64, 0), after.object.get("scene_rev").?.integer);
+    // Nothing half-computed was cached: the stopped scene renders exactly
+    // like an untouched one.
+    const pa = try f.call("render.preview", try f.fmt("{{\"scene_id\":\"{s}\",\"width\":64,\"height\":48}}", .{a}));
+    const pb = try f.call("render.preview", try f.fmt("{{\"scene_id\":\"{s}\",\"width\":64,\"height\":48}}", .{b}));
+    try testing.expectEqualSlices(u8, pb.ok.image.?.bytes, pa.ok.image.?.bytes);
+}
+
+test "tool calls become spans that continue the caller's trace" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const arena = f.arena_state.allocator();
+    const root = try f.tmp.dir.realPathFileAlloc(testing.io, ".", arena);
+    var tel: telemetry.Telemetry = .{ .io = testing.io, .version = "test" };
+    try tel.openTraceFile(try std.fs.path.join(arena, &.{ root, "spans.jsonl" }));
+    defer tel.deinit();
+    f.server.config.telemetry = &tel;
+
+    const parent = telemetry.TraceContext.parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "").?;
+    const created = try f.server.callTraced(arena, "scene.create", try std.json.parseFromSliceLeaky(Value, arena, "{}", .{}), parent);
+    const id = (try std.json.parseFromSliceLeaky(Value, arena, created.ok.structured, .{})).object.get("scene_id").?.string;
+    const failed = try f.server.callTraced(arena, "object.delete", try std.json.parseFromSliceLeaky(Value, arena, try f.fmt("{{\"scene_id\":\"{s}\",\"objects\":[\"Nope\"]}}", .{id}), .{}), null);
+    try testing.expect(failed == .tool_error);
+
+    const text = try f.tmp.dir.readFileAlloc(testing.io, "spans.jsonl", arena, .limited(1 << 20));
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    var spans: [2]std.json.ObjectMap = undefined;
+    for (&spans) |*sp| {
+        const v = try std.json.parseFromSliceLeaky(Value, arena, lines.next().?, .{});
+        sp.* = v.object.get("resourceSpans").?.array.items[0].object.get("scopeSpans").?.array.items[0].object.get("spans").?.array.items[0].object;
+    }
+    try testing.expect(lines.next() == null);
+    try testing.expectEqualStrings("4bf92f3577b34da6a3ce929d0e0e4736", spans[0].get("traceId").?.string);
+    try testing.expectEqualStrings("00f067aa0ba902b7", spans[0].get("parentSpanId").?.string);
+    try testing.expectEqual(@as(i64, 1), spans[0].get("status").?.object.get("code").?.integer);
+    // Without a traceparent the call starts its own trace.
+    try testing.expect(!std.mem.eql(u8, "4bf92f3577b34da6a3ce929d0e0e4736", spans[1].get("traceId").?.string));
+    try testing.expect(spans[1].get("parentSpanId") == null);
+    try testing.expectEqual(@as(i64, 2), spans[1].get("status").?.object.get("code").?.integer);
+    var saw_scene = false;
+    for (spans[1].get("attributes").?.array.items) |at| {
+        if (std.mem.eql(u8, at.object.get("key").?.string, "zender.scene_id")) saw_scene = std.mem.eql(u8, id, at.object.get("value").?.object.get("stringValue").?.string);
+    }
+    try testing.expect(saw_scene);
 }

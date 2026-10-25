@@ -162,6 +162,47 @@ pub fn writeObjectSummary(c: *Call, w: *std.json.Stringify, h: IdHandle) Handler
     try w.endObject();
 }
 
+/// Compact collection summary: name, parent, the objects linked directly
+/// into it, and its hide flags when set.
+pub fn writeCollectionSummary(c: *Call, w: *std.json.Stringify, h: IdHandle) HandlerError!void {
+    const db = &c.doc().db;
+    const coll = db.get(.collection, h).?;
+    try w.beginObject();
+    try w.objectField("name");
+    try w.write(coll.name.slice());
+    if (core.edit.collectionParent(db, h)) |p| {
+        try w.objectField("parent");
+        try w.write(db.get(.collection, p).?.name.slice());
+    }
+    try w.objectField("objects");
+    try w.beginArray();
+    for (coll.objects.slice()) |o| if (db.get(.object, o)) |ob| try w.write(ob.name.slice());
+    try w.endArray();
+    if (coll.hide_render) {
+        try w.objectField("hide_render");
+        try w.write(true);
+    }
+    if (coll.hide_viewport) {
+        try w.objectField("hide_viewport");
+        try w.write(true);
+    }
+    try w.endObject();
+}
+
+/// Every collection from the master down, parents before children.
+pub fn writeCollectionTree(c: *Call, w: *std.json.Stringify) HandlerError!void {
+    try w.beginArray();
+    if (c.doc().sceneData().collection) |root| try writeSubtree(c, w, root, 0);
+    try w.endArray();
+}
+
+fn writeSubtree(c: *Call, w: *std.json.Stringify, h: IdHandle, depth: u32) HandlerError!void {
+    if (depth > 64) return;
+    const coll = c.doc().db.get(.collection, h) orelse return;
+    try writeCollectionSummary(c, w, h);
+    for (coll.children.slice()) |child| try writeSubtree(c, w, child, depth + 1);
+}
+
 /// Applies a `properties` object to a datablock through the registry,
 /// stopping at the first invalid entry.
 pub fn setProperties(c: *Call, comptime T: type, target: *T, props: std.json.Value, arg_name: []const u8) HandlerError!usize {

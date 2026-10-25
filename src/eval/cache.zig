@@ -46,12 +46,19 @@ pub const Cache = struct {
         c.normals_by_key.deinit(c.gpa);
     }
 
+    /// Drops every entry, e.g. after a call was stopped part-way, when some
+    /// results may be incomplete.
+    pub fn clear(c: *Cache) void {
+        c.deinit();
+        c.normals_by_key = .empty;
+    }
+
     /// Starts an evaluation; entries not touched before `sweep` are freed.
     pub fn begin(c: *Cache) void {
         c.epoch += 1;
     }
 
-    pub fn cornerNormals(c: *Cache, m: *const Mesh, pool: math.Pool) Allocator.Error![]const Vec3 {
+    pub fn cornerNormals(c: *Cache, m: *const Mesh, pool: math.Pool) (Allocator.Error || math.DeadlineError)![]const Vec3 {
         const key = Key.of(m);
         if (c.normals_by_key.getPtr(key)) |e| {
             e.used = c.epoch;

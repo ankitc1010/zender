@@ -84,6 +84,7 @@ fn preview(c: *Call) HandlerError!void {
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidCamera => return c.fail(.invalid_argument, "the camera cannot be used for rendering (singular transform)", .{}),
+        error.DeadlineExceeded => return error.ToolFailed, // reported by the command core
     };
     defer result.deinit(gpa);
 
@@ -163,7 +164,7 @@ fn preview(c: *Call) HandlerError!void {
     try c.out.endArray();
     // Meshes with no pixels are often a mistake worth surfacing.
     for (scene.nodes, 0..) |n, i| {
-        if (n.kind == .mesh and !n.hide_render and counts[i + 1] == 0) try c.warn("'{s}' is not visible in this view", .{n.name});
+        if (n.kind == .mesh and !n.hide_render and !n.hide_viewport and counts[i + 1] == 0) try c.warn("'{s}' is not visible in this view", .{n.name});
     }
     try c.say("Rendered {d}x{d} preview through {s}: {d} object(s) visible.", .{ width, height, result.camera_name, n_visible });
 }

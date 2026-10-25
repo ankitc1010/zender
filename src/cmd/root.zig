@@ -5,6 +5,7 @@ pub const paths = @import("paths.zig");
 pub const server = @import("server.zig");
 pub const catalog = @import("catalog.zig");
 pub const replay = @import("replay.zig");
+pub const telemetry = @import("telemetry.zig");
 
 pub const Server = server.Server;
 pub const Outcome = server.Outcome;
@@ -16,5 +17,6 @@ test {
     _ = server;
     _ = catalog;
     _ = replay;
+    _ = telemetry;
     _ = @import("tests.zig");
 }

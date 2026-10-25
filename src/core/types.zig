@@ -54,9 +54,11 @@ pub const Collection = struct {
     objects: Shared(IdHandle) = .empty,
     children: Shared(IdHandle) = .empty,
     hide_render: bool = false,
+    hide_viewport: bool = false,
 
     pub const props = [_]Prop{
-        .{ .name = "hide_render", .field = "hide_render", .kind = .bool, .doc = "Exclude the collection from renders and exports" },
+        .{ .name = "hide_render", .field = "hide_render", .kind = .bool, .doc = "Exclude the collection's objects and child collections from renders and exports", .blend = "flag" },
+        .{ .name = "hide_viewport", .field = "hide_viewport", .kind = .bool, .doc = "Hide the collection's objects and child collections in previews", .blend = "flag" },
     };
 
     pub fn retainRefs(c: *Collection) void {

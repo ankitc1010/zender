@@ -28,7 +28,7 @@ pub fn faceNormals(gpa: Allocator, m: *const Mesh) Allocator.Error![]Vec3 {
 ///
 /// Per-face and per-vertex steps run on `pool`; the accumulation into
 /// vertices runs in one fixed order, so results do not depend on threads.
-pub fn cornerNormals(gpa: Allocator, m: *const Mesh, pool: math.Pool) Allocator.Error![]Vec3 {
+pub fn cornerNormals(gpa: Allocator, m: *const Mesh, pool: math.Pool) (Allocator.Error || math.DeadlineError)![]Vec3 {
     const pos = m.positions.slice();
     const off = m.face_offsets.slice();
     const cv = m.corner_verts.slice();
@@ -99,7 +99,7 @@ pub fn cornerNormals(gpa: Allocator, m: *const Mesh, pool: math.Pool) Allocator.
     };
     var ctx: Ctx = .{ .pos = pos, .off = off, .cv = cv, .sharp = sharp, .fnorm = fnorm, .weight = weight, .out = out, .n_faces = n_faces, .smooth = any_smooth };
     const face_chunks = (n_faces + chunk_faces - 1) / chunk_faces;
-    pool.parallelFor(face_chunks, &ctx, Ctx.faces);
+    try pool.parallelFor(face_chunks, &ctx, Ctx.faces);
     if (any_smooth) {
         const vnorm = try gpa.alloc(Vec3, pos.len);
         defer gpa.free(vnorm);
@@ -114,10 +114,10 @@ pub fn cornerNormals(gpa: Allocator, m: *const Mesh, pool: math.Pool) Allocator.
             }
         }
         ctx.vnorm = vnorm;
-        pool.parallelFor((pos.len + chunk_verts - 1) / chunk_verts, &ctx, Ctx.normalizeVerts);
-        pool.parallelFor(face_chunks, &ctx, Ctx.corners);
+        try pool.parallelFor((pos.len + chunk_verts - 1) / chunk_verts, &ctx, Ctx.normalizeVerts);
+        try pool.parallelFor(face_chunks, &ctx, Ctx.corners);
     } else {
-        pool.parallelFor(face_chunks, &ctx, Ctx.corners);
+        try pool.parallelFor(face_chunks, &ctx, Ctx.corners);
     }
     return out;
 }

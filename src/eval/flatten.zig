@@ -23,6 +23,8 @@ const Maps = struct {
     material: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 };
 
+pub const Error = Allocator.Error || math.DeadlineError;
+
 pub const Context = struct {
     pool: math.Pool,
     /// Evaluated data kept between calls; null evaluates from scratch.
@@ -32,15 +34,22 @@ pub const Context = struct {
 const Cache = @import("cache.zig").Cache;
 
 /// Builds an `ir.Scene` in `arena`. Every object in the scene becomes a node,
-/// parents before children; render-hidden objects keep `hide_render` set.
+/// parents before children; hidden objects keep their hide flags set, taking
+/// collection visibility into account.
 /// With a cache, evaluated data is reused and the cache keeps only what this
 /// scene uses.
-pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Allocator.Error!ir.Scene {
+pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
     if (ctx.cache) |c| c.begin();
     defer if (ctx.cache) |c| c.sweep();
     const db = &doc.db;
     const scene = doc.sceneData();
-    const objects = try core.edit.sceneObjects(doc, arena);
+    const vis = try core.edit.sceneVisibility(doc, arena);
+    const objects = try arena.alloc(IdHandle, vis.len);
+    var vis_of: std.AutoHashMapUnmanaged(u32, core.edit.Visibility) = .empty;
+    for (vis, objects) |x, *h| {
+        h.* = x.handle;
+        try vis_of.put(arena, x.handle.index, x);
+    }
 
     // Parents first: depth-first from roots, children in object order.
     var order: std.ArrayList(IdHandle) = .empty;
@@ -94,7 +103,8 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Allocator.Error!i
             .world = world,
             .kind = kind,
             .materials = slots,
-            .hide_render = ob.hide_render,
+            .hide_render = ob.hide_render or !vis_of.get(h.index).?.render,
+            .hide_viewport = ob.hide_viewport or !vis_of.get(h.index).?.viewport,
         };
     }
 
@@ -136,7 +146,7 @@ fn visit(
     }
 }
 
-fn meshIndex(arena: Allocator, ctx: Context, maps: *Maps, list: *std.ArrayList(ir.Mesh), h: IdHandle, m: *const types.Mesh) Allocator.Error!u32 {
+fn meshIndex(arena: Allocator, ctx: Context, maps: *Maps, list: *std.ArrayList(ir.Mesh), h: IdHandle, m: *const types.Mesh) Error!u32 {
     const gop = try maps.mesh.getOrPut(arena, h.index);
     if (gop.found_existing) return gop.value_ptr.*;
     gop.value_ptr.* = @intCast(list.items.len);
@@ -145,7 +155,7 @@ fn meshIndex(arena: Allocator, ctx: Context, maps: *Maps, list: *std.ArrayList(i
 }
 
 /// The evaluated mesh: base mesh plus normals (modifier stack in P1).
-pub fn evaluateMesh(arena: Allocator, ctx: Context, m: *const types.Mesh) Allocator.Error!ir.Mesh {
+pub fn evaluateMesh(arena: Allocator, ctx: Context, m: *const types.Mesh) Error!ir.Mesh {
     const uvs: []const [2]f32 = if (m.attribute(types.Mesh.uv_name)) |a| switch (a.data) {
         .float2 => |s| if (a.domain == .corner) s.slice() else &.{},
         else => &.{},

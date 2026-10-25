@@ -123,7 +123,7 @@ pub fn autoView(scene: *const ir.Scene, aspect: f32) View {
     var lo: Vec3 = .{ std.math.inf(f32), std.math.inf(f32), std.math.inf(f32) };
     var hi: Vec3 = .{ -std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
     for (scene.nodes) |n| {
-        if (n.hide_render or n.kind != .mesh) continue;
+        if (n.hide_render or n.hide_viewport or n.kind != .mesh) continue;
         for (scene.meshes[n.kind.mesh].positions) |p| {
             const w = v.transformPoint(n.world, p);
             lo = v.min3(lo, w);
@@ -169,7 +169,7 @@ pub fn cameraView(scene: *const ir.Scene, node: u32, aspect: f32) View {
     };
 }
 
-pub const RenderError = Allocator.Error || error{InvalidCamera};
+pub const RenderError = Allocator.Error || math.DeadlineError || error{InvalidCamera};
 
 pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError!Result {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -193,7 +193,7 @@ pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError
     var insts: std.ArrayList(Instance) = .empty;
     var n_verts: usize = 0;
     for (scene.nodes, 0..) |n, i| {
-        if (n.hide_render or n.kind != .mesh) continue;
+        if (n.hide_render or n.hide_viewport or n.kind != .mesh) continue;
         const mesh = &scene.meshes[n.kind.mesh];
         const slots = @max(1, n.materials.len);
         const colors = try arena.alloc([3]f32, slots);
@@ -258,8 +258,8 @@ pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError
     };
     @memset(tctx.outs, .{});
     defer for (tctx.outs) |*o| o.deinit(gpa);
-    opts.pool.parallelFor(vchunks.items.len, &tctx, SetupCtx.transform);
-    opts.pool.parallelFor(fchunks.items.len, &tctx, SetupCtx.triangles);
+    try opts.pool.parallelFor(vchunks.items.len, &tctx, SetupCtx.transform);
+    try opts.pool.parallelFor(fchunks.items.len, &tctx, SetupCtx.triangles);
 
     // Merge chunk outputs in order.
     var n_tris: usize = 0;
@@ -297,7 +297,7 @@ pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError
         .tiles_y = tiles_y,
         .n_tiles = n_tiles,
     };
-    opts.pool.parallelFor(tctx.outs.len, &mctx, MergeCtx.merge);
+    try opts.pool.parallelFor(tctx.outs.len, &mctx, MergeCtx.merge);
 
     // Tile starts, then each chunk's write position inside each tile.
     const tile_start = try arena.alloc(u32, n_tiles + 1);
@@ -316,7 +316,7 @@ pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError
         }
     }
     mctx.tile_tris = try arena.alloc(u32, tile_start[n_tiles]);
-    opts.pool.parallelFor(tctx.outs.len, &mctx, MergeCtx.fill);
+    try opts.pool.parallelFor(tctx.outs.len, &mctx, MergeCtx.fill);
 
     const n_px = @as(usize, width) * height;
     const rgba = try gpa.alloc(u8, n_px * 4);
@@ -343,7 +343,7 @@ pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError
         .depth = depth,
         .object_id = object_id,
     };
-    opts.pool.parallelFor(n_tiles, &ctx, renderTile);
+    try opts.pool.parallelFor(n_tiles, &ctx, renderTile);
     if (opts.wireframe) drawWireframe(&ctx, view_proj, world_to_view, view.shift_ndc);
 
     return .{

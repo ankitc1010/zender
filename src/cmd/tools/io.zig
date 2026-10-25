@@ -16,10 +16,11 @@ pub const tools = [_]Tool{
     .{
         .name = "io.export",
         .title = "Export file",
-        .description = "Write the scene to a file inside an allowed root: .glb (binary glTF 2.0) or .gltf (JSON, embedded buffer). Converts Z-up to glTF's Y-up as Blender does; render-hidden objects are skipped unless include_hidden. Reports anything the format could not carry. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"path\":\"out/table.glb\"}.",
+        .description = "Write the scene to a file inside an allowed root: .glb (binary glTF 2.0), .gltf (JSON, embedded buffer), or .json (canonical scene.json for diffs: every datablock by name, mesh arrays as digests unless geometry is full). glTF converts Z-up to Y-up as Blender does, skips render-hidden objects unless include_hidden, and reports anything it could not carry. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"path\":\"out/table.glb\"}.",
         .params = common.reading(&.{
             .{ .name = "path", .type = .{ .string = .{ .max_len = 4096 } }, .doc = "Output path; relative paths start at the first allowed root", .required = true },
-            .{ .name = "format", .type = .{ .enumeration = &.{ "auto", "glb", "gltf" } }, .doc = "File format; auto picks from the extension", .default = .{ .string = "auto" } },
+            .{ .name = "format", .type = .{ .enumeration = &.{ "auto", "glb", "gltf", "json" } }, .doc = "File format; auto picks from the extension", .default = .{ .string = "auto" } },
+            .{ .name = "geometry", .type = .{ .enumeration = &.{ "digest", "full" } }, .doc = "scene.json mesh arrays: digests or full data", .default = .{ .string = "digest" } },
             .{ .name = "overwrite", .type = .boolean, .doc = "Replace an existing file", .default = .{ .boolean = false } },
             .{ .name = "include_hidden", .type = .boolean, .doc = "Also export objects hidden from render", .default = .{ .boolean = false } },
         }),
@@ -40,11 +41,14 @@ fn exportFile(c: *Call) HandlerError!void {
             format = "glb";
         } else if (std.ascii.eqlIgnoreCase(ext, ".gltf")) {
             format = "gltf";
+        } else if (std.ascii.eqlIgnoreCase(ext, ".json")) {
+            format = "json";
         } else {
-            return c.failAt(.invalid_argument, "/path", "use a .glb or .gltf extension, or set format", &.{ "glb", "gltf" }, "cannot tell the format of '{s}'", .{p});
+            return c.failAt(.invalid_argument, "/path", "use a .glb, .gltf or .json extension, or set format", &.{ "glb", "gltf", "json" }, "cannot tell the format of '{s}'", .{p});
         }
     }
     const abs = paths.resolveOutput(s.io, c.arena, s.config.roots, p) catch |err| return render_tools.pathFailure(c, err, p);
+    if (std.mem.eql(u8, format, "json")) return exportCanonical(c, abs, p);
 
     const scene = try c.evaluate();
     var out: std.Io.Writer.Allocating = .init(c.arena);
@@ -75,4 +79,24 @@ fn exportFile(c: *Call) HandlerError!void {
     try c.field("dropped");
     try c.out.write(report.dropped);
     try c.say("Exported {d} node(s), {d} triangles to {s} ({d} bytes).", .{ report.nodes, report.triangles, abs, report.bytes });
+}
+
+fn exportCanonical(c: *Call, abs: []const u8, p: []const u8) HandlerError!void {
+    var out: std.Io.Writer.Allocating = .init(c.arena);
+    var w: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_1 } };
+    const full = std.mem.eql(u8, c.args.str("geometry").?, "full");
+    engine.core.canonical.write(c.arena, c.doc(), &w, .{ .geometry = if (full) .full else .hash }) catch return error.OutOfMemory;
+    out.writer.writeByte('\n') catch return error.OutOfMemory;
+    paths.writeFileAtomic(c.server.io, abs, out.written(), c.args.boolean("overwrite").?) catch |err| switch (err) {
+        error.AlreadyExists => return c.failAt(.io_error, "/path", "pass overwrite: true to replace it", &.{}, "'{s}' already exists", .{p}),
+        error.OutOfMemory => return error.OutOfMemory,
+        error.WriteFailed => return c.failAt(.io_error, "/path", "", &.{}, "could not write '{s}'", .{p}),
+    };
+    try c.field("path");
+    try c.out.write(abs);
+    try c.field("format");
+    try c.out.write("json");
+    try c.field("bytes");
+    try c.out.write(out.written().len);
+    try c.say("Wrote scene.json to {s} ({d} bytes).", .{ abs, out.written().len });
 }

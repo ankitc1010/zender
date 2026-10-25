@@ -1,6 +1,7 @@
 //! Object-level scene edits that keep references consistent: linking into
-//! collections, deleting with reference cleanup, parenting without cycles,
-//! duplication. Callers run these inside a Transaction.
+//! collections and managing their tree, deleting with reference cleanup,
+//! parenting without cycles, duplication. Callers run these inside a
+//! Transaction.
 
 const std = @import("std");
 const math = @import("math");
@@ -8,6 +9,7 @@ const ids = @import("ids.zig");
 const types = @import("types.zig");
 const Database = @import("database.zig").Database;
 const Document = @import("document.zig").Document;
+const Shared = @import("shared.zig").Shared;
 
 const Allocator = std.mem.Allocator;
 const IdHandle = ids.IdHandle;
@@ -22,56 +24,211 @@ pub fn addObject(doc: *Document, name: []const u8, kind: types.ObjectKind, data:
     return ob;
 }
 
+/// Links `ob` into the scene's master collection.
 pub fn link(doc: *Document, ob: IdHandle) EditError!void {
     const coll_h = doc.sceneData().collection orelse return error.StaleHandle;
-    const coll = doc.db.get(.collection, coll_h) orelse return error.StaleHandle;
-    for (coll.objects.slice()) |h| if (h.eql(ob)) return;
-    const old = coll.objects.slice();
-    const items = try doc.gpa.alloc(IdHandle, old.len + 1);
-    @memcpy(items[0..old.len], old);
-    items[old.len] = ob;
-    coll.objects.release(doc.gpa);
-    coll.objects = try .fromOwned(doc.gpa, items);
+    return linkTo(doc, coll_h, ob);
 }
 
-fn removeFromList(gpa: Allocator, list: anytype, h: IdHandle) Allocator.Error!void {
+/// Links `ob` into a collection; linking it twice is a no-op.
+pub fn linkTo(doc: *Document, coll_h: IdHandle, ob: IdHandle) (Allocator.Error || error{StaleHandle})!void {
+    const coll = doc.db.get(.collection, coll_h) orelse return error.StaleHandle;
+    try appendUnique(doc.gpa, &coll.objects, ob);
+}
+
+fn contains(list: Shared(IdHandle), h: IdHandle) bool {
+    for (list.slice()) |x| if (x.eql(h)) return true;
+    return false;
+}
+
+/// Swaps in `items`, which must come from `gpa`, freeing them on failure.
+fn replaceList(gpa: Allocator, list: *Shared(IdHandle), items: []IdHandle) Allocator.Error!void {
+    errdefer gpa.free(items);
+    const fresh = try Shared(IdHandle).fromOwned(gpa, items);
+    list.release(gpa);
+    list.* = fresh;
+}
+
+fn appendUnique(gpa: Allocator, list: *Shared(IdHandle), h: IdHandle) Allocator.Error!void {
+    if (contains(list.*, h)) return;
     const old = list.slice();
-    var n: usize = 0;
-    for (old) |x| if (!x.eql(h)) {
-        n += 1;
-    };
-    if (n == old.len) return;
-    const items = try gpa.alloc(IdHandle, n);
+    const items = try gpa.alloc(IdHandle, old.len + 1);
+    @memcpy(items[0..old.len], old);
+    items[old.len] = h;
+    try replaceList(gpa, list, items);
+}
+
+fn removeFromList(gpa: Allocator, list: *Shared(IdHandle), h: IdHandle) Allocator.Error!void {
+    if (!contains(list.*, h)) return;
+    const old = list.slice();
+    const items = try gpa.alloc(IdHandle, old.len - 1);
     var i: usize = 0;
     for (old) |x| if (!x.eql(h)) {
         items[i] = x;
         i += 1;
     };
-    list.release(gpa);
-    list.* = try .fromOwned(gpa, items);
+    try replaceList(gpa, list, items);
 }
 
+/// An object in the scene and whether some chain of collections from the
+/// master down leaves it visible. The object's own hide flags are not
+/// applied here.
+pub const Visibility = struct {
+    handle: IdHandle,
+    render: bool,
+    viewport: bool,
+};
+
 /// Every object in the scene, from the master collection down, without
-/// duplicates, in collection order.
-pub fn sceneObjects(doc: *Document, gpa: Allocator) Allocator.Error![]IdHandle {
-    var out: std.ArrayList(IdHandle) = .empty;
+/// duplicates, in collection order. An object linked into several
+/// collections is visible if any of them is, as in Blender.
+pub fn sceneVisibility(doc: *Document, gpa: Allocator) Allocator.Error![]Visibility {
+    var out: std.ArrayList(Visibility) = .empty;
     errdefer out.deinit(gpa);
-    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    var seen: std.AutoHashMapUnmanaged(u32, u32) = .empty;
     defer seen.deinit(gpa);
     const root = doc.sceneData().collection orelse return out.toOwnedSlice(gpa);
-    try collectObjects(&doc.db, gpa, root, &out, &seen, 0);
+    try collectObjects(&doc.db, gpa, root, &out, &seen, false, false, 0);
     return out.toOwnedSlice(gpa);
 }
 
-fn collectObjects(db: *Database, gpa: Allocator, coll_h: IdHandle, out: *std.ArrayList(IdHandle), seen: *std.AutoHashMapUnmanaged(u32, void), depth: u32) Allocator.Error!void {
+/// Every object in the scene, as `sceneVisibility` orders them.
+pub fn sceneObjects(doc: *Document, gpa: Allocator) Allocator.Error![]IdHandle {
+    const vis = try sceneVisibility(doc, gpa);
+    defer gpa.free(vis);
+    const out = try gpa.alloc(IdHandle, vis.len);
+    for (vis, out) |x, *h| h.* = x.handle;
+    return out;
+}
+
+fn collectObjects(
+    db: *Database,
+    gpa: Allocator,
+    coll_h: IdHandle,
+    out: *std.ArrayList(Visibility),
+    seen: *std.AutoHashMapUnmanaged(u32, u32),
+    parent_hide_render: bool,
+    parent_hide_viewport: bool,
+    depth: u32,
+) Allocator.Error!void {
     if (depth > 64) return;
     const coll = db.get(.collection, coll_h) orelse return;
+    const hide_render = parent_hide_render or coll.hide_render;
+    const hide_viewport = parent_hide_viewport or coll.hide_viewport;
     for (coll.objects.slice()) |h| {
         if (db.get(.object, h) == null) continue;
         const gop = try seen.getOrPut(gpa, h.index);
-        if (!gop.found_existing) try out.append(gpa, h);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(out.items.len);
+            try out.append(gpa, .{ .handle = h, .render = false, .viewport = false });
+        }
+        const x = &out.items[gop.value_ptr.*];
+        x.render = x.render or !hide_render;
+        x.viewport = x.viewport or !hide_viewport;
     }
-    for (coll.children.slice()) |c| try collectObjects(db, gpa, c, out, seen, depth + 1);
+    for (coll.children.slice()) |c| try collectObjects(db, gpa, c, out, seen, hide_render, hide_viewport, depth + 1);
+}
+
+// Collections form a tree under the scene's master collection: each other
+// collection has exactly one parent. Blender allows a collection under
+// several parents; P2's .blend reader will have to flatten that case.
+
+pub const CollectionError = Allocator.Error || error{ StaleHandle, ParentCycle, MasterCollection, LastCollection };
+
+pub fn isMasterCollection(doc: *Document, coll_h: IdHandle) bool {
+    const m = doc.sceneData().collection orelse return false;
+    return m.eql(coll_h);
+}
+
+/// The collection that holds `coll_h` as a child; null for the master.
+pub fn collectionParent(db: *Database, coll_h: IdHandle) ?IdHandle {
+    var it = db.collection.iterator();
+    while (it.next()) |e| if (contains(e.value.children, coll_h)) return e.handle;
+    return null;
+}
+
+/// How many collections `ob` is linked into.
+pub fn collectionCount(db: *Database, ob: IdHandle) usize {
+    var n: usize = 0;
+    var it = db.collection.iterator();
+    while (it.next()) |e| {
+        if (contains(e.value.objects, ob)) n += 1;
+    }
+    return n;
+}
+
+/// Creates a collection as the last child of `parent`, or of the master
+/// collection when null.
+pub fn createCollection(doc: *Document, name: []const u8, parent: ?IdHandle) CollectionError!IdHandle {
+    const p = parent orelse doc.sceneData().collection orelse return error.StaleHandle;
+    if (doc.db.get(.collection, p) == null) return error.StaleHandle;
+    const h = try doc.db.create(.collection, name, .{});
+    // create may grow the pool, so look the parent up again.
+    try appendUnique(doc.gpa, &doc.db.get(.collection, p).?.children, h);
+    return h;
+}
+
+/// Moves `ob` into a collection and out of every other one (Blender's M).
+pub fn moveObject(doc: *Document, coll_h: IdHandle, ob: IdHandle) CollectionError!void {
+    if (doc.db.get(.object, ob) == null) return error.StaleHandle;
+    try linkTo(doc, coll_h, ob);
+    var it = doc.db.collection.iterator();
+    while (it.next()) |e| if (!e.handle.eql(coll_h)) try removeFromList(doc.gpa, &e.value.objects, ob);
+}
+
+/// Unlinks `ob` from a collection. The last link cannot go: an object in
+/// no collection drops out of the scene, which is what deleteObject is for.
+pub fn unlinkObject(doc: *Document, coll_h: IdHandle, ob: IdHandle) CollectionError!void {
+    const coll = doc.db.get(.collection, coll_h) orelse return error.StaleHandle;
+    if (!contains(coll.objects, ob)) return;
+    if (collectionCount(&doc.db, ob) <= 1) return error.LastCollection;
+    try removeFromList(doc.gpa, &coll.objects, ob);
+}
+
+/// True when `h` is `root` or lies anywhere below it.
+fn isWithin(db: *Database, h: IdHandle, root: IdHandle, depth: u32) bool {
+    if (h.eql(root)) return true;
+    if (depth > 64) return false;
+    const coll = db.get(.collection, root) orelse return false;
+    for (coll.children.slice()) |c| if (isWithin(db, h, c, depth + 1)) return true;
+    return false;
+}
+
+/// Moves a collection, with everything below it, under `parent_h`.
+pub fn setCollectionParent(doc: *Document, coll_h: IdHandle, parent_h: IdHandle) CollectionError!void {
+    if (isMasterCollection(doc, coll_h)) return error.MasterCollection;
+    const db = &doc.db;
+    if (db.get(.collection, coll_h) == null or db.get(.collection, parent_h) == null) return error.StaleHandle;
+    if (isWithin(db, parent_h, coll_h, 0)) return error.ParentCycle;
+    if (collectionParent(db, coll_h)) |old| {
+        if (old.eql(parent_h)) return;
+        try removeFromList(doc.gpa, &db.get(.collection, old).?.children, coll_h);
+    }
+    try appendUnique(doc.gpa, &db.get(.collection, parent_h).?.children, coll_h);
+}
+
+/// Deletes a collection, as Blender's "Delete" does: its objects are linked
+/// into its parent and its child collections take its place there.
+pub fn deleteCollection(doc: *Document, coll_h: IdHandle) CollectionError!void {
+    if (isMasterCollection(doc, coll_h)) return error.MasterCollection;
+    const db = &doc.db;
+    const coll = db.get(.collection, coll_h) orelse return error.StaleHandle;
+    const parent_h = collectionParent(db, coll_h) orelse doc.sceneData().collection orelse return error.StaleHandle;
+    const parent = db.get(.collection, parent_h).?;
+    for (coll.objects.slice()) |ob| try appendUnique(doc.gpa, &parent.objects, ob);
+
+    const old = parent.children.slice();
+    const moved = coll.children.slice();
+    var items: std.ArrayList(IdHandle) = .empty;
+    errdefer items.deinit(doc.gpa);
+    try items.ensureTotalCapacity(doc.gpa, old.len + moved.len);
+    for (old) |c| {
+        if (c.eql(coll_h)) {
+            for (moved) |m| if (!contains(parent.children, m)) items.appendAssumeCapacity(m);
+        } else items.appendAssumeCapacity(c);
+    }
+    try replaceList(doc.gpa, &parent.children, try items.toOwnedSlice(doc.gpa));
+    _ = db.remove(.collection, coll_h);
 }
 
 pub fn worldMatrix(db: *Database, ob_h: IdHandle) Allocator.Error!math.Mat4 {
@@ -174,7 +331,14 @@ pub fn duplicateObject(doc: *Document, ob_h: IdHandle, name: []const u8, linked:
     var copy = src;
     copy.data = data;
     const h = try doc.db.create(.object, name, copy);
-    try link(doc, h);
+    // The copy joins the source's collections, as in Blender.
+    var linked_any = false;
+    var it = doc.db.collection.iterator();
+    while (it.next()) |e| if (contains(e.value.objects, ob_h)) {
+        try appendUnique(doc.gpa, &e.value.objects, h);
+        linked_any = true;
+    };
+    if (!linked_any) try link(doc, h);
     return h;
 }
 
@@ -207,6 +371,7 @@ pub fn userCount(db: *Database, h: IdHandle) u32 {
 }
 
 const testing = std.testing;
+const Transaction = @import("document.zig").Transaction;
 
 test "parenting keeps world transform and rejects cycles" {
     var doc = try Document.initEmpty(testing.allocator, "Scene");
@@ -243,4 +408,86 @@ test "duplicate copies or links data" {
     const objs = try sceneObjects(&doc, gpa);
     defer gpa.free(objs);
     try testing.expectEqual(@as(usize, 3), objs.len);
+}
+
+test "collections nest, move objects and hand contents up on delete" {
+    const gpa = testing.allocator;
+    var doc = try Document.initEmpty(gpa, "Scene");
+    defer doc.deinit();
+    const master = doc.sceneData().collection.?;
+    const a = try addObject(&doc, "A", .empty, null);
+    const b = try addObject(&doc, "B", .empty, null);
+    const table = try createCollection(&doc, "Table", null);
+    const legs = try createCollection(&doc, "Legs", table);
+    try testing.expect(collectionParent(&doc.db, legs).?.eql(table));
+    try testing.expect(collectionParent(&doc.db, table).?.eql(master));
+    try testing.expect(collectionParent(&doc.db, master) == null);
+
+    try moveObject(&doc, legs, a);
+    try testing.expectEqual(@as(usize, 1), collectionCount(&doc.db, a));
+    try testing.expectError(error.LastCollection, unlinkObject(&doc, legs, a));
+    try linkTo(&doc, table, a);
+    try unlinkObject(&doc, legs, a);
+    try testing.expectEqual(@as(usize, 1), collectionCount(&doc.db, a));
+
+    try testing.expectError(error.ParentCycle, setCollectionParent(&doc, table, legs));
+    try testing.expectError(error.ParentCycle, setCollectionParent(&doc, table, table));
+    try testing.expectError(error.MasterCollection, setCollectionParent(&doc, master, table));
+    try testing.expectError(error.MasterCollection, deleteCollection(&doc, master));
+
+    // Deleting Table hands A to the master and Legs takes Table's place.
+    try moveObject(&doc, legs, b);
+    {
+        var tx = try Transaction.begin(&doc);
+        defer tx.end();
+        try deleteCollection(&doc, table);
+        try tx.commit("delete collection");
+    }
+    try testing.expect(doc.db.get(.collection, table) == null);
+    try testing.expect(collectionParent(&doc.db, legs).?.eql(master));
+    try testing.expect(contains(doc.db.get(.collection, master).?.objects, a));
+    const objs = try sceneObjects(&doc, gpa);
+    defer gpa.free(objs);
+    try testing.expectEqual(@as(usize, 2), objs.len);
+
+    // Undo restores the collection, its place and its links.
+    var buf: [64]u8 = undefined;
+    _ = try doc.undo(&buf);
+    try testing.expect(collectionParent(&doc.db, legs).?.eql(table));
+    try testing.expect(contains(doc.db.get(.collection, table).?.objects, a));
+    try testing.expect(!contains(doc.db.get(.collection, master).?.objects, a));
+}
+
+test "hidden collections hide objects unless another link shows them" {
+    const gpa = testing.allocator;
+    var doc = try Document.initEmpty(gpa, "Scene");
+    defer doc.deinit();
+    const a = try addObject(&doc, "A", .empty, null);
+    const b = try addObject(&doc, "B", .empty, null);
+    const props = try createCollection(&doc, "Props", null);
+    const inner = try createCollection(&doc, "Inner", props);
+    try moveObject(&doc, inner, a);
+    try moveObject(&doc, props, b);
+    doc.db.get(.collection, props).?.hide_render = true;
+    doc.db.get(.collection, inner).?.hide_viewport = true;
+    {
+        const vis = try sceneVisibility(&doc, gpa);
+        defer gpa.free(vis);
+        try testing.expectEqual(@as(usize, 2), vis.len);
+        for (vis) |x| {
+            try testing.expect(!x.render); // Props hides both, Inner included
+            try testing.expectEqual(!x.handle.eql(a), x.viewport);
+        }
+    }
+    try linkTo(&doc, doc.sceneData().collection.?, a);
+    const vis = try sceneVisibility(&doc, gpa);
+    defer gpa.free(vis);
+    for (vis) |x| if (x.handle.eql(a)) {
+        try testing.expect(x.render and x.viewport);
+    };
+
+    // Duplicates join the source's collections.
+    const c = try duplicateObject(&doc, b, "B", false);
+    try testing.expect(contains(doc.db.get(.collection, props).?.objects, c));
+    try testing.expectEqual(@as(usize, 1), collectionCount(&doc.db, c));
 }

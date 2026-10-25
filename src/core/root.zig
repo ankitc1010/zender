@@ -7,6 +7,7 @@ pub const registry = @import("registry.zig");
 pub const database = @import("database.zig");
 pub const document = @import("document.zig");
 pub const edit = @import("edit.zig");
+pub const canonical = @import("canonical.zig");
 
 pub const Shared = @import("shared.zig").Shared;
 pub const IdType = ids.IdType;
@@ -23,5 +24,6 @@ test {
     _ = database;
     _ = document;
     _ = edit;
+    _ = canonical;
     _ = @import("shared.zig");
 }

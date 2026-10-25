@@ -1,6 +1,11 @@
-# CI as in TRD §14: one Linux runner checks formatting and cross-compiles
-# every target (CLI and tests); each Tier 1 platform then runs the tests
-# natively and smoke-tests the binary.
+# CI as in TRD §14: one Linux runner checks formatting, cross-compiles
+# every target (CLI and tests) and runs the wasm32-wasi tests; each Tier 1
+# platform then runs the tests natively and smoke-tests the binary. The
+# other Tier 2 target, x86-64 macOS, runs its tests on the Apple Silicon
+# runner under Rosetta 2. The golden suites run inside zig build test; a
+# separate job measures line coverage with kcov.
+#
+# mlugg/setup-zig@v2 still declares Node 20; GitHub runs it on Node 24.
 name: ci
 on:
   push:
@@ -10,22 +15,28 @@ jobs:
   cross:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig fmt --check build.zig src
+      - run: zig fmt --check build.zig src tests
       - name: Cross-compile CLI and tests
         run: |
-          for t in x86_64-linux-musl aarch64-linux-musl aarch64-macos x86_64-macos x86_64-windows-gnu; do
+          for t in x86_64-linux-musl aarch64-linux-musl aarch64-macos x86_64-macos x86_64-windows-gnu wasm32-wasi; do
             echo "::group::$t"
             zig build install test-compile -Dtarget=$t --prefix out/$t
             echo "::endgroup::"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zender-${{ github.sha }}
           path: out/*/bin/zender*
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # Engine, render and I/O only; scripts/run-wasi.mjs runs them on Node's WASI.
+      - name: wasm32-wasi tests (Tier 2)
+        run: zig build test -Dtarget=wasm32-wasi --summary all
 
   test:
     strategy:
@@ -37,11 +48,16 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       - run: zig build test --summary all
+      - name: x86-64 macOS tests under Rosetta 2 (Tier 2)
+        if: matrix.os == 'macos-latest'
+        run: |
+          arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
+          zig build test -Dtarget=x86_64-macos -frosetta --summary all
       - run: zig build
       - name: Replay the example command log
         run: |
@@ -57,12 +73,38 @@ jobs:
             | ./zig-out/bin/zender serve --stdio > out.jsonl
           grep -q '"supportedVersions":\["2026-07-28"' out.jsonl
           grep -q '"name":"render.preview"' out.jsonl
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: matrix.os == 'ubuntu-latest'
         with:
           node-version: 22
+      - name: MCP Inspector session, both protocol eras
+        if: matrix.os == 'ubuntu-latest'
+        run: scripts/inspector-session.sh
+      - name: Memory targets (NFR-5)
+        if: matrix.os == 'ubuntu-latest'
+        run: node scripts/measure-memory.mjs --check
       - name: Khronos glTF validator
         if: matrix.os == 'ubuntu-latest'
         run: |
           npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/validator" gltf-validator@2.0.0-dev.3.10
           node scripts/validate-gltf.mjs "$RUNNER_TEMP/validator/node_modules" dining.glb dining.gltf
+
+  # TRD §15: line coverage of src/core, src/geom and src/io. Reported per
+  # directory in the job summary; add `--min 85` to make it a merge gate.
+  # ubuntu-26.04 because Ubuntu 24.04 does not package kcov.
+  coverage:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y kcov
+      - run: node scripts/coverage.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/merged

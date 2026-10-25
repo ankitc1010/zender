@@ -30,7 +30,7 @@ pub const tools = [_]Tool{
     .{
         .name = "scene.inspect",
         .title = "Inspect scene",
-        .description = "Read the scene: settings, active camera and an outline of every object with type, location (m), rotation (deg), scale and world bounds; with 'object', that object's full properties and data. Read-only. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Cube\"}.",
+        .description = "Read the scene: settings, active camera, an outline of every object with type, location (m), rotation (deg), scale and world bounds, and the collection tree once there is more than the master; with 'object', that object's full properties and data. Read-only. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Cube\"}.",
         .params = common.reading(&.{
             .{ .name = "object", .type = .{ .name_ref = .{} }, .doc = "Object to describe in full; omit for the scene outline" },
         }),
@@ -225,6 +225,10 @@ fn inspect(c: *Call) HandlerError!void {
         try c.field("bounds");
         try common.writeBounds(w, .{ lo, hi });
     }
+    if (doc.db.collection.live > 1) {
+        try c.field("collections");
+        try common.writeCollectionTree(c, w);
+    }
     try c.field("materials");
     try w.beginArray();
     var mit = doc.db.material.iterator();
@@ -277,9 +281,10 @@ fn validate(c: *Call) HandlerError!void {
         const cw = try core.edit.worldMatrix(&doc.db, cam);
         const fwd = v.normalize(v.transformDir(cw, .{ 0, 0, -1 }));
         const eye = v.translation(cw);
-        for (objects) |h| {
+        for (try core.edit.sceneVisibility(doc, c.arena)) |x| {
+            const h = x.handle;
             const ob = doc.db.get(.object, h).?;
-            if (ob.kind != .mesh or ob.hide_render) continue;
+            if (ob.kind != .mesh or ob.hide_render or !x.render) continue;
             const b = (try engine.eval.flatten.objectBounds(doc, h)) orelse continue;
             var any_front = false;
             for (0..8) |k| {

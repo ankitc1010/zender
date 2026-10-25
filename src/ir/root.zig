@@ -46,7 +46,9 @@ pub const Node = struct {
     kind: NodeKind,
     /// Material per slot, for mesh nodes. `null` slots render with a default.
     materials: []const ?u32,
+    /// Effective flags: the object's own, or every collection it is in hides it.
     hide_render: bool,
+    hide_viewport: bool = false,
 };
 
 pub const Mesh = struct {

@@ -5,9 +5,25 @@
 //! array only if someone else still holds it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-var next_serial: std.atomic.Value(u64) = .init(1);
+/// Source of buffer serials. wasm32 has no 64-bit atomics, and its builds
+/// are single-threaded, so a plain counter serves there.
+const SerialCounter = if (builtin.single_threaded) struct {
+    n: u64 = 1,
+    fn next(c: *@This()) u64 {
+        defer c.n += 1;
+        return c.n;
+    }
+} else struct {
+    n: std.atomic.Value(u64) = .init(1),
+    fn next(c: *@This()) u64 {
+        return c.n.fetchAdd(1, .monotonic);
+    }
+};
+
+var next_serial: SerialCounter = .{};
 
 pub fn Shared(comptime T: type) type {
     return struct {
@@ -31,7 +47,7 @@ pub fn Shared(comptime T: type) type {
                 return .{};
             }
             const box = try gpa.create(Box);
-            box.* = .{ .refs = .init(1), .serial = next_serial.fetchAdd(1, .monotonic), .items = items };
+            box.* = .{ .refs = .init(1), .serial = next_serial.next(), .items = items };
             return .{ .box = box };
         }
 
@@ -77,7 +93,7 @@ pub fn Shared(comptime T: type) type {
         pub fn mut(s: *Self, gpa: Allocator) Allocator.Error![]T {
             const b = s.box orelse return &.{};
             if (b.refs.load(.acquire) == 1) {
-                b.serial = next_serial.fetchAdd(1, .monotonic);
+                b.serial = next_serial.next();
                 return b.items;
             }
             const fresh = try fromSlice(gpa, b.items);

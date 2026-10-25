@@ -4,7 +4,7 @@ A headless 3D scene engine in Zig that LLM agents drive through the Model Contex
 
 Zender borrows Blender's concepts (datablocks, an RNA-style property registry, Blender's primitives and defaults) but is an independent implementation, not a fork. The design is in the [technical requirements document](https://claude.ai/artifact/6DEysg565wv9dJ7wv7XRQi).
 
-**Status: P0 (Foundations), version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, look at them with a preview renderer, and export glTF 2.0. Mesh editing, modifiers and `.blend` I/O come in P1 and P2 (see [Roadmap](#roadmap)).
+**Status: P0 (Foundations), version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, group them in collections, look at them with a preview renderer, and export glTF 2.0 or a canonical `scene.json`. Mesh editing, modifiers and `.blend` I/O come in P1 and P2 (see [Roadmap](#roadmap)).
 
 ## Build
 
@@ -12,11 +12,13 @@ Requires Zig 0.16.0.
 
 ```sh
 zig build            # zig-out/bin/zender (ReleaseSafe)
-zig build test       # unit and integration tests
+zig build test       # unit, integration and golden tests
+zig build test -Dupdate-golden                       # rewrite tests/golden from current output; review the diff
+zig build test -Dtarget=wasm32-wasi                  # engine, render and I/O tests on Node's WASI
 zig build test-compile -Dtarget=x86_64-windows-gnu   # build tests for another target without running them
 ```
 
-CI (`.github/workflows/ci.yml`) checks formatting and cross-compiles the CLI and tests for Linux (x86-64, arm64), macOS (arm64, x86-64) and Windows (x86-64). It then runs the tests natively on Linux x86-64 and arm64, macOS and Windows, replays `examples/dining.jsonl`, checks the MCP handshake over stdio, and validates the exported glTF with the Khronos validator.
+CI (`.github/workflows/ci.yml`) checks formatting and cross-compiles the CLI and tests for Linux (x86-64, arm64), macOS (arm64, x86-64), Windows (x86-64) and wasm32-wasi, and runs the WASI tests. It then runs the tests natively on Linux x86-64 and arm64, macOS and Windows, plus the x86-64 macOS tests under Rosetta 2. It replays `examples/dining.jsonl`, checks the MCP handshake over stdio, runs a scripted MCP Inspector session in both protocol eras, checks the memory targets, and validates the exported glTF with the Khronos validator. A separate job measures line coverage with kcov.
 
 ## Use with an MCP client
 
@@ -35,12 +37,16 @@ Zender speaks MCP 2026-07-28 (stateless: `server/discover`, per-request `_meta`)
 Other commands:
 
 ```sh
-zender run ops.jsonl -o out.glb   # replay a command log, write .glb, .gltf or .png
+zender run ops.jsonl -o out.glb   # replay a command log, write .glb, .gltf, .json (scene.json) or .png
 zender tools [--json]             # list the tools and their input schemas
 zender version
 ```
 
 Exit codes: 0 success, 1 user error, 2 I/O error, 3 internal error.
+
+The operator, not the agent, sets the per-call budgets (SEC-3): `--max-triangles` (default 20 M), `--max-scene-mb` (4096), `--max-wall-ms` (60000), `--max-render-edge` (8192), `--max-spp` (4096) and `--confirm-delete-over` (10). The wall-time limit stops a call part-way: parallel loops stop claiming work, `scene.apply` checks it between ops, and the call fails with `budget_exceeded` and changes nothing.
+
+Observability: `serve` writes one JSON log line per tool call to stderr (`--log-format json|text|off`). `--trace-file <path>` appends one OpenTelemetry span per call as OTLP/JSON, the format the Collector's `otlpjsonfile` receiver reads. A span continues the caller's trace when the request's `_meta` carries `traceparent` and `tracestate`.
 
 ## Tools
 
@@ -48,6 +54,7 @@ Exit codes: 0 success, 1 user error, 2 I/O error, 3 internal error.
 | --- | --- |
 | Scene | `scene.create`, `scene.inspect`, `scene.validate`, `scene.undo`, `scene.redo`, `scene.apply`, `scene.close` |
 | Object | `object.add_primitive`, `object.duplicate`, `object.delete`, `object.transform`, `object.set_parent`, `object.set_properties` |
+| Collection | `collection.create`, `collection.update`, `collection.delete` |
 | Shading | `material.create`, `material.update`, `material.assign`, `world.set` |
 | Camera and light | `camera.add`, `camera.look_at`, `camera.frame_objects`, `light.add` |
 | Render | `render.preview` |
@@ -60,7 +67,7 @@ Every call names its scene with the `scene_id` that `scene.create` returns. Muta
 
 `render.preview` returns the image inline (long edge ≤ 1024 px), a `zender://scene/{id}/render/{job}` link to the full-size PNG, and which objects are visible and how many pixels each covers.
 
-Resources: `zender://scenes`, `zender://scene/{id}/outline`, `zender://scene/{id}/object/{name}`, `zender://scene/{id}/render/{job}`, `zender://scene/{id}/log`, `zender://docs/{topic}`. Prompts: `build_scene_from_description`, `product_shot`.
+Resources: `zender://scenes`, `zender://scene/{id}/outline`, `zender://scene/{id}/object/{name}`, `zender://scene/{id}/render/{job}`, `zender://scene/{id}/log`, `zender://scene/{id}/scene.json`, `zender://docs/{topic}`. Prompts: `build_scene_from_description`, `product_shot`.
 
 ## Design
 
@@ -78,10 +85,17 @@ Five layers; `build.zig` gives each module imports only from lower layers, so an
 - **Property registry:** each datablock type declares its properties once. That table drives validation, unit conversion at the boundary, JSON Schema for the tools, `schema.describe`, and the `.blend` member names for P2.
 - **Determinism:** the same command log and seed give byte-identical glTF and PNG output, independent of thread count. All parallel work runs through one `parallelFor` on the shared `std.Io` pool. Chunks write disjoint outputs and merge in fixed order.
 - **Evaluation cache:** evaluated normals are cached per scene, keyed by buffer serials that are never reused and change on every write.
+- **Collections:** a tree under the scene's master collection, one parent each. An object is hidden from render or preview only if every collection path to it hides it, as in Blender.
+- **scene.json (FR-DM-8):** a canonical dump for diffs and tests: datablocks sorted by name and linked by name, stored units (metres, radians), mesh arrays as XxHash64 digests or in full. Equal scenes give byte-identical files.
 
 ## Testing
 
-`zig build test` runs 49 tests: math, data model, undo, primitives (counts and volumes), normals, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG, glTF export, path confinement, the command core end to end, command-log replay, and the MCP protocol. These suites in the TRD's plan aren't automated yet: MCP conformance, Blender parity, fuzzing, benchmark gates and agent evaluation.
+`zig build test` runs 64 tests: math, data model, collections, undo, scene.json, primitives, normals, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG encode and decode, glTF export, path confinement, budgets and tracing, the command core end to end, command-log replay, the MCP protocol, and two golden suites:
+
+- **Golden geometry** (`tests/golden/geometry.json`): 12 primitive cases. Counts and a digest of the connectivity must match exactly. Bounds, area, volume and UV sums must match within a tolerance, because trigonometry may differ in the last bit between platforms' libm.
+- **Golden render** (`tests/golden/render/`): 5 previews replayed from command logs, compared by PSNR (≥ 40 dB) and the share of pixels off by more than 8 levels (≤ 0.2%).
+
+The official MCP conformance suite tests servers over HTTP only, so it joins CI with Streamable HTTP in P3. Until then `scripts/inspector-session.sh` drives the server with MCP Inspector over stdio in both protocol eras, with `--strict` schema checks. Still to come: FLIP for renders, Blender parity, fuzzing, benchmark gates and agent evaluation.
 
 Checks run by hand during P0:
 
@@ -96,13 +110,15 @@ Measured on a phone (MediaTek Dimensity 9400, 8 cores, ReleaseSafe). The TRD's t
 | Non-geometry tool on a 1.3 M-triangle scene | 2–5 ms | ≤ 20 ms p95 |
 | `render.preview` 512×512, 1.3 M triangles | 140 ms first, ~84 ms after | ≤ 150 ms for 1 M |
 | Binary size (ReleaseSafe, not stripped) | 6.5 MB | ≤ 30 MB |
-| `tools/list` payload | 32.7 KB | ≤ 40 KB |
+| `tools/list` payload | 37.8 KB | ≤ 40 KB |
+| Idle RSS (`scripts/measure-memory.mjs`) | 1.5 MB | ≤ 30 MB |
+| RSS over mesh bytes, 1 M-triangle scene after a preview | 1.55× | ≤ 2.5× |
 
 ## Roadmap
 
 | Phase | Scope | Gate |
 | --- | --- | --- |
-| P0 Foundations (this release) | Data model, registry, command core, log, MCP stdio, primitives, cameras, preview render, glTF | An agent builds a scene and exports glTF |
+| P0 Foundations (this release) | Data model, registry, collections, command core, log, MCP stdio, primitives, cameras, preview render, glTF, scene.json | An agent builds a scene and exports glTF |
 | P1 Modeling | EditMesh, selectors, 10 mesh operators, modifier stack, depsgraph, OBJ/STL/PLY | Golden and determinism suites green; agent eval ≥ 50% |
 | P2 Blender interop | `.blend` read and write, images, keyframes, parity harness, loss reports | Round-trip parity on the `.blend` corpus |
 | P3 Production | CPU path tracer, MCP tasks, Streamable HTTP and auth, C ABI, fuzzing, benchmarks | All NFRs met, agent eval ≥ 80%, 24 h fuzz clean |

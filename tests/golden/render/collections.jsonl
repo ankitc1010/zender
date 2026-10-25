@@ -1,0 +1,5 @@
+{"tool":"scene.create","params":{"name":"Collections","template":"default"}}
+{"tool":"object.add_primitive","params":{"kind":"plane","name":"Floor","size":10,"location":[0,0,-1]}}
+{"tool":"object.add_primitive","params":{"kind":"uv_sphere","name":"Ball","location":[2.5,0,0],"smooth":true}}
+{"tool":"collection.create","params":{"name":"Hidden","objects":["Cube"]}}
+{"tool":"collection.update","params":{"collection":"Hidden","properties":{"hide_render":true}}}

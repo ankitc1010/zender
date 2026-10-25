@@ -159,6 +159,16 @@ pub const Session = struct {
         return out.written();
     }
 
+    /// W3C trace context from `_meta` (FR-MCP-3), if the client sent one.
+    fn traceContext(params: Value) ?cmd.telemetry.TraceContext {
+        const meta = params.object.get("_meta") orelse return null;
+        if (meta != .object) return null;
+        const tp = meta.object.get("traceparent") orelse return null;
+        if (tp != .string) return null;
+        const ts = meta.object.get("tracestate") orelse Value{ .string = "" };
+        return .parse(tp.string, if (ts == .string) ts.string else "");
+    }
+
     fn toolsCall(s: *Session, arena: Allocator, id: Value, params: Value, modern: bool, elicitation: bool) Allocator.Error![]const u8 {
         const name_v = params.object.get("name") orelse return errorResponse(arena, id, -32602, "Invalid params: tools/call needs a tool name", null);
         if (name_v != .string) return errorResponse(arena, id, -32602, "Invalid params: name must be a string", null);
@@ -179,7 +189,7 @@ pub const Session = struct {
             args = .{ .object = a };
         };
 
-        const outcome = try s.server.call(arena, name_v.string, args);
+        const outcome = try s.server.callTraced(arena, name_v.string, args, traceContext(params));
         switch (outcome) {
             .unknown_tool => return errorResponse(arena, id, -32602, try std.fmt.allocPrint(arena, "Unknown tool: {s}", .{name_v.string}), null),
             .tool_error => |te| {
@@ -216,6 +226,7 @@ pub const Session = struct {
                     .{ .uri = "zender://scene/{scene_id}/object/{name}", .name = "Object", .desc = "Full properties of one object", .mime = "application/json" },
                     .{ .uri = "zender://scene/{scene_id}/render/{job_id}", .name = "Render", .desc = "Full-resolution PNG of a render.preview result", .mime = "image/png" },
                     .{ .uri = "zender://scene/{scene_id}/log", .name = "Command log", .desc = "Replayable JSONL log of every change", .mime = "application/x-ndjson" },
+                    .{ .uri = "zender://scene/{scene_id}/scene.json", .name = "Canonical scene", .desc = "Every datablock by name in stored units, mesh arrays as digests; byte-identical for equal scenes", .mime = "application/json" },
                     .{ .uri = "zender://docs/{topic}", .name = "Docs", .desc = "Reference: conventions, or properties of object, camera, light, material, world, scene", .mime = "text/markdown" },
                 };
                 try wr.objectField("resourceTemplates");
@@ -563,6 +574,9 @@ fn readResource(srv: *Server, arena: Allocator, uri: []const u8) Allocator.Error
         }
         return .{ .mime = "application/x-ndjson", .text = out.items };
     }
+    if (std.mem.eql(u8, what, "scene.json")) {
+        return .{ .mime = "application/json", .text = try cmd.server.canonicalJson(arena, e) };
+    }
     if (std.mem.startsWith(u8, what, "render/")) {
         const job = std.fmt.parseInt(u64, what["render/".len..], 10) catch return null;
         for (e.renders.items) |r| if (r.job == job) return .{ .mime = "image/png", .blob = r.png, .ttl_ms = 3600000 };
@@ -596,6 +610,8 @@ fn writeScenes(w: *Stringify, srv: *Server) Stringify.Error!void {
         try w.write(e.doc.dirty > 0);
         try w.objectField("objects");
         try w.write(e.doc.db.object.live);
+        try w.objectField("bytes");
+        try w.write(cmd.server.sceneBytes(&e.doc));
         try w.endObject();
     }
     try w.endArray();

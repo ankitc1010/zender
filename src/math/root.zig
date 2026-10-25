@@ -4,6 +4,8 @@
 pub const vec = @import("vec.zig");
 pub const triangulate = @import("triangulate.zig");
 pub const Pool = @import("pool.zig").Pool;
+pub const Deadline = @import("pool.zig").Deadline;
+pub const DeadlineError = @import("pool.zig").DeadlineError;
 
 pub const Vec3 = vec.Vec3;
 pub const Vec4 = vec.Vec4;

@@ -148,9 +148,9 @@ fn frameObjects(c: *Call) HandlerError!void {
     if (names.len > 0) {
         for (names, 0..) |n, i| try targets.append(c.arena, try c.lookup(.object, n.string, try std.fmt.allocPrint(c.arena, "/objects/{d}", .{i})));
     } else {
-        for (try core.edit.sceneObjects(doc, c.arena)) |h| {
-            const o = doc.db.get(.object, h).?;
-            if (o.kind == .mesh and !o.hide_render) try targets.append(c.arena, h);
+        for (try core.edit.sceneVisibility(doc, c.arena)) |x| {
+            const o = doc.db.get(.object, x.handle).?;
+            if (o.kind == .mesh and !o.hide_render and x.render) try targets.append(c.arena, x.handle);
         }
     }
     for (targets.items) |h| if (try engine.eval.flatten.objectBounds(doc, h)) |b| {

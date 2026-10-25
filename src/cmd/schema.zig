@@ -194,10 +194,20 @@ fn writeParamSchema(p: Param, w: *Stringify) Stringify.Error!void {
             try w.write(s.max_items);
         },
         .name_ref => |r| {
-            try w.objectField("type");
+            // anyOf rather than a type array: clients that map schemas onto
+            // a single-type dialect (Gemini's OpenAPI subset) accept it.
             if (r.nullable) {
-                try w.write(&[_][]const u8{ "string", "null" });
+                try w.objectField("anyOf");
+                try w.beginArray();
+                for ([_][]const u8{ "string", "null" }) |t| {
+                    try w.beginObject();
+                    try w.objectField("type");
+                    try w.write(t);
+                    try w.endObject();
+                }
+                try w.endArray();
             } else {
+                try w.objectField("type");
                 try w.write("string");
             }
         },

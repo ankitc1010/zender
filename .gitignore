@@ -4,3 +4,5 @@ zig-out/
 *.gltf
 *.png
 !docs/**/*.png
+!tests/golden/**/*.png
+coverage/

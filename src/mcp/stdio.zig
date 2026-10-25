@@ -10,8 +10,11 @@ const Io = std.Io;
 pub const max_message = 16 << 20;
 
 pub fn serve(io: Io, gpa: std.mem.Allocator, session: *protocol.Session) !void {
-    const in_buf = try gpa.alloc(u8, max_message);
-    defer gpa.free(in_buf);
+    // rawAlloc skips the 0xAA fill that safe builds give new memory, so
+    // pages a message never reaches stay unmapped (idle RSS, NFR-5).
+    const in_ptr = gpa.rawAlloc(max_message, .of(u8), @returnAddress()) orelse return error.OutOfMemory;
+    const in_buf = in_ptr[0..max_message];
+    defer gpa.rawFree(in_buf, .of(u8), @returnAddress());
     var reader = Io.File.stdin().readerStreaming(io, in_buf);
     var out_buf: [64 * 1024]u8 = undefined;
     var writer = Io.File.stdout().writerStreaming(io, &out_buf);

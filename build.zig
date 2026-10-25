@@ -36,6 +36,10 @@ pub fn build(b: *std.Build) void {
     // Non-kernel code builds ReleaseSafe by default (NFR-8).
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimize mode (default ReleaseSafe)") orelse .ReleaseSafe;
     const version = b.option([]const u8, "version", "Version string") orelse "0.1.0-dev";
+    // wasm32-wasi is a Tier 2 target for the engine, render and I/O only,
+    // single-threaded (TRD §14): no executable, and tests stop below the
+    // command core, which needs a full file system and process model.
+    const core_only = target.result.cpu.arch.isWasm();
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
@@ -72,18 +76,54 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(exe);
-
-    const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
-    b.step("run", "Run zender").dependOn(&run.step);
+    if (!core_only) {
+        b.installArtifact(exe);
+        const run = b.addRunArtifact(exe);
+        if (b.args) |args| run.addArgs(args);
+        b.step("run", "Run zender").dependOn(&run.step);
+    }
 
     // Unit tests: every module's `test` blocks. test-compile only builds
     // them, so CI can check foreign targets it cannot run.
     const test_step = b.step("test", "Run unit tests");
     const test_compile = b.step("test-compile", "Build unit tests without running them");
     for (modules, layers) |m, l| {
+        if (core_only and l.level > 3) continue;
         const t = b.addTest(.{ .name = b.fmt("test-{s}", .{l.name}), .root_module = m });
+        const run_t = if (core_only) blk: {
+            // Node's built-in WASI runs them, so no wasm runtime is needed.
+            const r = b.addSystemCommand(&.{ "node", "--no-warnings" });
+            r.setName(b.fmt("run test-{s} (node wasi)", .{l.name}));
+            r.addFileArg(b.path("scripts/run-wasi.mjs"));
+            r.addArtifactArg(t);
+            break :blk r;
+        } else b.addRunArtifact(t);
+        test_step.dependOn(&run_t.step);
+        test_compile.dependOn(&b.addInstallArtifact(t, .{}).step);
+    }
+
+    // Golden suites (TRD §15) sit above the command core: they replay
+    // command logs and compare with the files in tests/golden.
+    if (!core_only) {
+        const golden_opts = b.addOptions();
+        golden_opts.addOption([]const u8, "dir", b.pathFromRoot("tests/golden"));
+        golden_opts.addOption([]const u8, "examples", b.pathFromRoot("examples"));
+        golden_opts.addOption(bool, "update", b.option(bool, "update-golden", "Rewrite tests/golden from the current output") orelse false);
+        const t = b.addTest(.{
+            .name = "test-golden",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/golden/root.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "math", .module = modules[0] },
+                    .{ .name = "io", .module = modules[3] },
+                    .{ .name = "engine", .module = modules[4] },
+                    .{ .name = "cmd", .module = cmd_mod },
+                    .{ .name = "golden_options", .module = golden_opts.createModule() },
+                },
+            }),
+        });
         test_step.dependOn(&b.addRunArtifact(t).step);
         test_compile.dependOn(&b.addInstallArtifact(t, .{}).step);
     }

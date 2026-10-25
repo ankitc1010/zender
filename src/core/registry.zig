@@ -131,6 +131,27 @@ fn writeField(comptime p: Prop, w: *Stringify, value: anytype) !void {
 }
 
 /// Writes every registered property of `v` as one JSON object, in
+/// declaration order, in stored units (radians), for scene.json.
+pub fn writeStoredValues(comptime T: type, v: *const T, w: *Stringify) !void {
+    try w.beginObject();
+    inline for (T.props) |p| {
+        try w.objectField(p.name);
+        const value = @field(v, p.field);
+        switch (p.kind) {
+            .float => try writeF32(w, value),
+            .int, .bool => try w.write(value),
+            .enumeration => try w.write(@tagName(value)),
+            .vec2, .vec3, .vec4, .color3, .color4 => {
+                try w.beginArray();
+                for (value) |c| try writeF32(w, c);
+                try w.endArray();
+            },
+        }
+    }
+    try w.endObject();
+}
+
+/// Writes every registered property of `v` as one JSON object, in
 /// declaration order, using agent-facing units.
 pub fn writeValues(comptime T: type, v: *const T, w: *Stringify) !void {
     try w.beginObject();
