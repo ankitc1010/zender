@@ -211,6 +211,7 @@ fn report(c: *Call, ob_h: IdHandle) HandlerError!void {
             .skipped => try c.warn("modifier '{s}' could not run and passed its input through (for a boolean or bevel: the mesh is not a closed surface)", .{m.name.slice()}),
             .no_target => try c.warn("modifier '{s}' has no usable target and does nothing", .{m.name.slice()}),
             .dropped_uvs => try c.warn("modifier '{s}' drops the UV map", .{m.name.slice()}),
+            .width_reduced => try c.warn("modifier '{s}': width reduced so neighbouring cuts do not cross (angle_limit is in degrees; a small one bevels many edges)", .{m.name.slice()}),
         }
     }
     try c.field("stack");

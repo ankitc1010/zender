@@ -591,6 +591,24 @@ test "modifier stack: add, validate, cycles, evaluate, export, apply, undo" {
     try testing.expectEqual(@as(i64, 6), back.object.get("count").?.integer);
 }
 
+test "mesh.sculpt strokes and their argument checks" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"grid\",\"name\":\"G\",\"grid_subdivisions\":40}}", .{id}));
+    const drawn = try f.ok("mesh.sculpt", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"stroke\":[[0.4,-0.5,0],[0.4,0.5,0]],\"radius\":0.15,\"symmetry\":\"x\"}}", .{id}));
+    try testing.expect(drawn.object.get("dabs").?.integer > 20);
+    const ridge = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"selector\":{{\"domain\":\"vert\",\"where\":\"z > 0.05\"}}}}", .{id}));
+    // Both ridges, at x = 0.4 and its mirror.
+    const b = ridge.object.get("bounds").?.object;
+    try testing.expect(schemaNumber(b.get("min").?.array.items[0]) < -0.3 and schemaNumber(b.get("max").?.array.items[0]) > 0.3);
+    const bad = try f.call("mesh.sculpt", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"stroke\":[[0,0,0],[1,1]]}}", .{id}));
+    try testing.expectEqualStrings("/stroke/1", bad.tool_error.path);
+    const far = try f.ok("mesh.sculpt", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"brush\":\"grab\",\"stroke\":[[0,0,0],[0,0,0.4]],\"radius\":0.3}}", .{id}));
+    try testing.expect(far.object.get("moved").?.integer > 0);
+}
+
 fn schemaNumber(v: Value) f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),

@@ -51,6 +51,8 @@ pub const Note = enum {
     no_target,
     /// UVs were dropped (decimate).
     dropped_uvs,
+    /// Bevel width was reduced so neighbouring cuts do not cross.
+    width_reduced,
 };
 
 /// Applies `md` to `m`, returning a new mesh the caller owns.
@@ -460,6 +462,7 @@ fn bevelEdges(gpa: Allocator, m: *const Mesh, md: *const Modifier, ctx: Context,
             return copy(m);
         },
     };
+    if (out.width_used < md.width) note.* = .width_reduced;
     out.deinit(gpa);
     return toMesh(gpa, &em, m, note);
 }

@@ -43,6 +43,8 @@ pub const Type = union(enum) {
     /// RGB or RGBA, scene-linear, 0..1.
     color,
     string_list: struct { max_items: usize = 4096 },
+    /// A path of [x, y, z] points (metres).
+    points: struct { max_items: usize = 1024 },
     /// Datablock name, or null where `nullable`.
     name_ref: struct { nullable: bool = false },
     /// Free-form object whose schema comes from the property registry;
@@ -191,6 +193,28 @@ fn writeParamSchema(p: Param, w: *Stringify) Stringify.Error!void {
             try w.objectField("type");
             try w.write("string");
             try w.endObject();
+            try w.objectField("maxItems");
+            try w.write(s.max_items);
+        },
+        .points => |s| {
+            try w.objectField("type");
+            try w.write("array");
+            try w.objectField("items");
+            try w.beginObject();
+            try w.objectField("type");
+            try w.write("array");
+            try w.objectField("items");
+            try w.beginObject();
+            try w.objectField("type");
+            try w.write("number");
+            try w.endObject();
+            try w.objectField("minItems");
+            try w.write(3);
+            try w.objectField("maxItems");
+            try w.write(3);
+            try w.endObject();
+            try w.objectField("minItems");
+            try w.write(1);
             try w.objectField("maxItems");
             try w.write(s.max_items);
         },
@@ -458,6 +482,19 @@ fn check(arena: Allocator, p: Param, val: Value, failure: *Failure) Allocator.Er
                 return fail(arena, failure, p, try std.fmt.allocPrint(arena, "/{d}", .{i}), "'{s}' must contain strings", .{p.name});
             return val;
         },
+        .points => |s| {
+            const arr = if (val == .array) val.array.items else return fail(arena, failure, p, "", "'{s}' must be a list of [x, y, z] points", .{p.name});
+            if (arr.len == 0 or arr.len > s.max_items) return fail(arena, failure, p, "", "'{s}' needs 1 to {d} points", .{ p.name, s.max_items });
+            for (arr, 0..) |item, i| {
+                const pt = if (item == .array) item.array.items else &[_]Value{};
+                if (pt.len != 3) return fail(arena, failure, p, try std.fmt.allocPrint(arena, "/{d}", .{i}), "'{s}' points must be [x, y, z]", .{p.name});
+                for (pt, 0..) |x, k| {
+                    const f = number(x) orelse return fail(arena, failure, p, try std.fmt.allocPrint(arena, "/{d}/{d}", .{ i, k }), "'{s}' must contain numbers", .{p.name});
+                    if (!std.math.isFinite(f) or @abs(f) > 1e9) return fail(arena, failure, p, try std.fmt.allocPrint(arena, "/{d}/{d}", .{ i, k }), "'{s}' coordinates must be finite, within 1e9", .{p.name});
+                }
+            }
+            return val;
+        },
         .name_ref => |r| return switch (val) {
             .string => |s| if (s.len == 0 or s.len > 255) fail(arena, failure, p, "", "'{s}' must be a name of 1 to 255 bytes", .{p.name}) else val,
             .null => if (r.nullable) val else fail(arena, failure, p, "", "'{s}' must be a name", .{p.name}),
@@ -526,6 +563,16 @@ pub const Args = struct {
         for (0..4) |i| out[i] = @floatCast(number(v.array.items[i]) orelse 0);
         return out;
     }
+    /// A `points` argument, already validated.
+    pub fn points(a: Args, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![][3]f32 {
+        const v = a.value(name) orelse return &.{};
+        const out = try arena.alloc([3]f32, v.array.items.len);
+        for (v.array.items, out) |item, *o| {
+            for (item.array.items, 0..) |x, k| o[k] = @floatCast(number(x).?);
+        }
+        return out;
+    }
+
     pub fn strings(a: Args, name: []const u8) []const Value {
         const v = a.map.get(name) orelse return &.{};
         return if (v == .array) v.array.items else &.{};

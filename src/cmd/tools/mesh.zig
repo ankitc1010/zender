@@ -205,6 +205,24 @@ pub const tools = [_]Tool{
         .kind = .mutating,
         .handler = smoothVerts,
     },
+    .{
+        .name = "mesh.sculpt",
+        .title = "Sculpt stroke",
+        .description = "Brush a stroke over a mesh as Blender's sculpt mode does. stroke is a path of world points, snapped to the nearest vertex; a dab falls every spacing x radius and moves vertices within radius (m) by the falloff. Brushes: draw (raise along the area normal), inflate (along each normal), flatten, pinch, crease (pinch and dig), smooth, grab (move the area under the first point to the last). subtract digs in; symmetry mirrors each dab across the object's local axis. Works best on dense meshes, e.g. after a subdivision modifier is applied. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Head\",\"brush\":\"draw\",\"stroke\":[[0.3,-0.9,0.4],[0.5,-0.85,0.45]],\"radius\":0.08,\"symmetry\":\"x\"}.",
+        .params = common.mutating(&.{
+            object_param,
+            .{ .name = "brush", .type = .{ .enumeration = std.meta.fieldNames(ops.sculpt.Brush) }, .doc = "Brush", .default = .{ .string = "draw" } },
+            .{ .name = "stroke", .type = .{ .points = .{} }, .doc = "Path of [x, y, z] world points", .required = true },
+            .{ .name = "radius", .type = .{ .number = .{ .min = 1e-5, .max = 1e6, .unit = .metres } }, .doc = "Brush radius", .default = .{ .number = 0.1 } },
+            .{ .name = "strength", .type = .{ .number = .{ .min = 0, .max = 1 } }, .doc = "Brush strength", .default = .{ .number = 0.5 } },
+            .{ .name = "subtract", .type = .boolean, .doc = "Dig in instead of raising (draw, inflate, crease)", .default = .{ .boolean = false } },
+            .{ .name = "symmetry", .type = .{ .enumeration = &.{ "none", "x", "y", "z" } }, .doc = "Mirror each dab across this local axis", .default = .{ .string = "none" } },
+            falloff_params[1],
+            .{ .name = "spacing", .type = .{ .number = .{ .min = 0.05, .max = 2 } }, .doc = "Dab spacing, fraction of the radius", .default = .{ .number = 0.25 } },
+        }),
+        .kind = .mutating,
+        .handler = sculpt,
+    },
 };
 
 const Target = struct {
@@ -766,6 +784,38 @@ fn boolean(c: *Call) HandlerError!void {
         .intersect => "Intersected",
     };
     try c.say("{s} '{s}' with '{s}' ({s} the operand); it now has {d} verts, {d} faces.", .{ verb, t.name(c), op_name, @tagName(action), m.vertCount(), m.faceCount() });
+}
+
+fn sculpt(c: *Call) HandlerError!void {
+    const t = try target(c);
+    const xf = try t.editXform(c);
+    const m = t.mesh(c);
+    const gpa = c.doc().gpa;
+    const path = try c.args.points(c.arena, "stroke");
+    var touched = try sel.Bits.initEmpty(c.arena, m.vertCount());
+    const stats = ops.sculpt.stroke(gpa, m, try m.positions.mut(gpa), xf, path, .{
+        .brush = std.meta.stringToEnum(ops.sculpt.Brush, c.args.str("brush").?).?,
+        .radius = @floatCast(c.args.float("radius").?),
+        .strength = @floatCast(c.args.float("strength").?),
+        .subtract = c.args.boolean("subtract").?,
+        .curve = std.meta.stringToEnum(ops.falloff.Curve, c.args.str("falloff_curve").?).?,
+        .symmetry = std.meta.stringToEnum(ops.sculpt.Symmetry, c.args.str("symmetry").?).?,
+        .spacing = @floatCast(c.args.float("spacing").?),
+    }, stopOf(c), &touched) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DeadlineExceeded => return error.ToolFailed,
+    };
+    if (stats.moved == 0) try c.warn("no vertex lay within the radius of the stroke; check the stroke points against mesh.select_preview bounds", .{});
+    if (m.vertCount() < 2000 and stats.moved > 0) try c.warn("'{s}' has only {d} vertices; sculpting looks smoother on a denser mesh (apply a subdivision modifier first)", .{ t.name(c), m.vertCount() });
+    try noteShared(c, t);
+    try c.markChanged(t.mh, m.name.slice());
+    try writeResult(c, .vert, try indices(c, &touched));
+    try c.field("dabs");
+    try c.out.write(stats.dabs);
+    try c.field("moved");
+    try c.out.write(stats.moved);
+    try writeCounts(c, m);
+    try c.say("Sculpted '{s}' with {s}: {d} dabs moved {d} vertices.", .{ t.name(c), c.args.str("brush").?, stats.dabs, stats.moved });
 }
 
 fn smoothVerts(c: *Call) HandlerError!void {

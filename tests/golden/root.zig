@@ -193,6 +193,15 @@ const ops_cases = [_]OpsCase{
     \\ {"tool":"modifier.add","arguments":{"object":"Slab","type":"boolean","target":"Drill"}},
     \\ {"tool":"modifier.apply","arguments":{"object":"Slab"}}]
     },
+    .{ .name = "sculpt_strokes_on_sphere", .object = "Sphere", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"uv_sphere","segments":32,"rings":16}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Sphere","type":"subdivision","properties":{"levels":1}}},
+    \\ {"tool":"modifier.apply","arguments":{"object":"Sphere"}},
+    \\ {"tool":"mesh.sculpt","arguments":{"object":"Sphere","stroke":[[0.3,-0.95,0.2],[0.3,-0.9,-0.3]],"radius":0.2,"strength":0.7,"symmetry":"x"}},
+    \\ {"tool":"mesh.sculpt","arguments":{"object":"Sphere","brush":"grab","stroke":[[0,-1,-0.4],[0,-1.3,-0.4]],"radius":0.3}},
+    \\ {"tool":"mesh.sculpt","arguments":{"object":"Sphere","brush":"crease","stroke":[[-0.3,-0.9,0.4],[0.3,-0.9,0.4]],"radius":0.1,"strength":0.8}},
+    \\ {"tool":"mesh.sculpt","arguments":{"object":"Sphere","brush":"smooth","stroke":[[0,-1.2,-0.4]],"radius":0.3,"strength":1}}]
+    },
     .{ .name = "uv_unwrap_smart_torus", .object = "Torus", .ops =
     \\[{"tool":"object.add_primitive","arguments":{"kind":"torus"}},
     \\ {"tool":"mesh.uv_unwrap","arguments":{"object":"Torus"}}]

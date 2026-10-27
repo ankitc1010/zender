@@ -23,6 +23,7 @@ pub const bevel = @import("ops/bevel.zig");
 pub const boolean = @import("ops/boolean.zig");
 pub const falloff = @import("ops/falloff.zig");
 pub const smooth = @import("ops/smooth.zig");
+pub const sculpt = @import("ops/sculpt.zig");
 
 /// The object's world matrix with the inverses operators need.
 pub const Xform = struct {
@@ -97,4 +98,5 @@ test {
     _ = boolean;
     _ = falloff;
     _ = smooth;
+    _ = sculpt;
 }
