@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
+    options.addOption(bool, "debug_allocator", b.option(bool, "debug-allocator", "Use the leak-checking DebugAllocator in release builds too") orelse false);
 
     var modules: [layers.len]*std.Build.Module = undefined;
     for (layers, 0..) |l, i| {
@@ -61,8 +62,22 @@ pub fn build(b: *std.Build) void {
             }
         }
     }
+    // Booleans (FR-GEO-4) use Manifold, a C++ library fetched as a lazy
+    // package and compiled here; wasm32 and -Dboolean=none build without it.
+    const Boolean = enum { manifold, none };
+    const boolean = b.option(Boolean, "boolean", "Boolean backend: manifold (default) or none") orelse
+        if (core_only) Boolean.none else Boolean.manifold;
+    const engine_options = b.addOptions();
+    engine_options.addOption(bool, "boolean", boolean == .manifold);
+    modules[4].addImport("engine_options", engine_options.createModule());
+    if (boolean == .manifold) {
+        if (b.lazyDependency("manifold", .{})) |dep| modules[4].linkLibrary(manifoldLibrary(b, dep, target, optimize));
+    }
+
     const cmd_mod = modules[5];
-    cmd_mod.addOptions("build_options", options);
+    // One module, shared by the command core and the CLI.
+    const options_mod = options.createModule();
+    cmd_mod.addImport("build_options", options_mod);
     const mcp_mod = modules[6];
 
     // The zender executable: CLI front end, which also hosts the MCP server.
@@ -79,6 +94,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addImport("build_options", options_mod);
     if (!core_only) {
         b.installArtifact(exe);
         const run = b.addRunArtifact(exe);
@@ -131,4 +147,41 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(t).step);
         test_compile.dependOn(&b.addInstallArtifact(t, .{}).step);
     }
+}
+
+const manifold_sources = [_][]const u8{
+    "boolean3.cpp",    "boolean_result.cpp", "constructors.cpp", "csg_tree.cpp",
+    "edge_op.cpp",     "execution_impl.cpp", "face_op.cpp",      "impl.cpp",
+    "manifold.cpp",    "minkowski.cpp",      "polygon.cpp",      "properties.cpp",
+    "quickhull.cpp",   "sdf.cpp",            "smoothing.cpp",    "sort.cpp",
+    "subdivision.cpp", "tree2d.cpp",
+};
+
+/// Manifold v3.5.4 plus Zender's C shim, as a static library: serial (no
+/// TBB), no CrossSection, and no FMA contraction, so results do not depend
+/// on the target's instruction set.
+fn manifoldLibrary(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = "manifold",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libcpp = true,
+            // Third-party code: no UBSan traps, and no debug info (it
+            // would more than double the binary).
+            .sanitize_c = .off,
+            .strip = true,
+        }),
+    });
+    const flags = [_][]const u8{ "-std=c++17", "-ffp-contract=off" };
+    const m = lib.root_module;
+    m.addCMacro("MANIFOLD_PAR", "-1");
+    m.addCMacro("MANIFOLD_NO_IOSTREAM", "1");
+    m.addCMacro("MANIFOLD_NO_FILESYSTEM", "1");
+    m.addIncludePath(dep.path("include"));
+    m.addIncludePath(dep.path("src"));
+    m.addCSourceFiles(.{ .root = dep.path("src"), .files = &manifold_sources, .flags = &flags });
+    m.addCSourceFile(.{ .file = b.path("src/geom/manifold/shim.cpp"), .flags = &flags });
+    return lib;
 }

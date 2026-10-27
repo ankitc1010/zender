@@ -479,6 +479,50 @@ test "OBJ, STL and PLY round trips through io.export and io.import" {
     try testing.expectEqualStrings("/path", unknown.tool_error.path);
 }
 
+test "mesh.boolean cuts, hides or deletes the operand, and explains failures" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Dark\"}}", .{id}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\"}}", .{id}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cylinder\",\"name\":\"Drill\",\"radius\":0.5,\"depth\":4,\"material\":\"Dark\"}}", .{id}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"plane\",\"name\":\"Sheet\"}}", .{id}));
+    _ = try f.ok("camera.add", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
+
+    const self = try f.call("mesh.boolean", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"operand\":\"Box\"}}", .{id}));
+    try testing.expectEqualStrings("/operand", self.tool_error.path);
+    const cam = try f.call("mesh.boolean", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"operand\":\"Camera\"}}", .{id}));
+    try testing.expectEqualStrings("/operand", cam.tool_error.path);
+    const open = try f.call("mesh.boolean", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"operand\":\"Sheet\"}}", .{id}));
+    try testing.expectEqualStrings("/operand", open.tool_error.path);
+    try testing.expect(std.mem.indexOf(u8, open.tool_error.hint, "closed") != null);
+    const open_target = try f.call("mesh.boolean", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Sheet\",\"operand\":\"Box\"}}", .{id}));
+    try testing.expectEqualStrings("/object", open_target.tool_error.path);
+
+    // A hole through the box: the drill's material joins the box, the
+    // drill is hidden, and the result is the hole's wall.
+    const cut = try f.ok("mesh.boolean", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"operand\":\"Drill\"}}", .{id}));
+    var res_json: std.Io.Writer.Allocating = .init(f.arena_state.allocator());
+    try std.json.Stringify.value(cut.object.get("result").?, .{}, &res_json.writer);
+    const wall = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{s}}}", .{ id, res_json.written() }));
+    try testing.expectEqual(@as(f64, 0.5), schemaNumber(wall.object.get("bounds").?.object.get("max").?.array.items[0]));
+    try testing.expectEqual(@as(f64, 1), schemaNumber(wall.object.get("bounds").?.object.get("max").?.array.items[2]));
+    const insp = try f.ok("scene.inspect", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
+    var insp_json: std.Io.Writer.Allocating = .init(f.arena_state.allocator());
+    try std.json.Stringify.value(insp, .{}, &insp_json.writer);
+    try testing.expect(std.mem.indexOf(u8, insp_json.written(), "\"Dark\"") != null);
+
+    // One undo brings the box back.
+    _ = try f.ok("scene.undo", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
+    const back = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 6), back.object.get("count").?.integer);
+    const gone = try f.ok("mesh.boolean", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"operand\":\"Drill\",\"operation\":\"intersect\",\"operand_action\":\"delete\"}}", .{id}));
+    _ = gone;
+    const deleted = try f.call("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Drill\"}}", .{id}));
+    try testing.expectEqual(server_mod.ErrorCode.not_found, deleted.tool_error.code);
+}
+
 fn schemaNumber(v: Value) f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),

@@ -5,6 +5,8 @@
 //! Exit codes (FR-CLI-3): 0 success, 1 user error, 2 I/O error, 3 internal.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const cmd = @import("cmd");
 const mcp = @import("mcp");
 const math = @import("math");
@@ -88,8 +90,19 @@ fn fail(comptime fmt: []const u8, args: anytype) Exit {
     return .user;
 }
 
+/// The allocator scenes and tool calls use. For ReleaseSafe without libc,
+/// std hands main its DebugAllocator, which makes every allocation slow;
+/// release builds use the fast general-purpose allocator instead. Debug
+/// builds and -Ddebug-allocator keep the DebugAllocator's leak and
+/// double-free checks (the tests always use std.testing.allocator).
+fn generalAllocator(init: std.process.Init) Allocator {
+    if (builtin.mode == .Debug or build_options.debug_allocator) return init.gpa;
+    if (builtin.link_libc) return std.heap.c_allocator;
+    return std.heap.smp_allocator;
+}
+
 fn run(init: std.process.Init) !Exit {
-    const gpa = init.gpa;
+    const gpa = generalAllocator(init);
     const io = init.io;
     const arena = init.arena.allocator();
 

@@ -1,6 +1,14 @@
 .{
     .name = .zender,
     .version = "0.1.0",
+    .dependencies = .{
+        .manifold = .{
+            .url = "https://github.com/elalish/manifold/archive/refs/tags/v3.5.4.tar.gz",
+            .hash = "N-V-__8AAGL7EQMPFt0LSMcnYwqCAGNWrHqQ7jKxvXgXvB-b",
+            // Booleans only; fetched unless built with -Dboolean=none.
+            .lazy = true,
+        },
+    },
     .fingerprint = 0x780f1b0789f16e01,
     .minimum_zig_version = "0.16.0",
     .paths = .{ "build.zig", "build.zig.zon", "src", "LICENSE", "README.md" },

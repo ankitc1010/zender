@@ -8,3 +8,10 @@ structure definitions, which are interoperability data.
 
 Code adapted from Apache-2.0 projects (for example Cycles) is listed below
 with its original copyright notice. None so far.
+
+Libraries built into Zender, unmodified:
+
+Manifold v3.5.4 (https://github.com/elalish/manifold), used for mesh
+booleans. Copyright The Manifold Authors. Licensed under the Apache
+License, Version 2.0. It is fetched at build time and is not part of this
+repository.

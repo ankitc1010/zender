@@ -137,6 +137,20 @@ const ops_cases = [_]OpsCase{
     \\[{"tool":"object.add_primitive","arguments":{"kind":"cylinder","segments":16}},
     \\ {"tool":"mesh.bevel","arguments":{"object":"Cylinder","selector":{"domain":"edge","where":"z > 0.99"},"width":0.15,"segments":3}}]
     },
+    .{ .name = "boolean_window_through_wall", .object = "Wall", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube","name":"Wall","size":1,"scale":[4,0.3,2.5],"location":[0,0,1.25]}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"cube","name":"Cut","size":1,"scale":[1.2,1,1],"location":[0.5,0,1.4]}},
+    \\ {"tool":"mesh.boolean","arguments":{"object":"Wall","operand":"Cut"}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"cylinder","name":"Hole","radius":0.3,"depth":1,"segments":16,"rotation":[90,0,0],"location":[-1.2,0,1.4]}},
+    \\ {"tool":"mesh.boolean","arguments":{"object":"Wall","operand":"Hole","operand_action":"delete"}}]
+    },
+    .{ .name = "boolean_union_intersect", .object = "Ball", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"uv_sphere","name":"Ball","segments":16,"rings":8}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"cylinder","name":"Rod","radius":0.4,"depth":3,"segments":12}},
+    \\ {"tool":"mesh.boolean","arguments":{"object":"Ball","operand":"Rod","operation":"union","operand_action":"keep"}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"cube","name":"Box","size":1.6}},
+    \\ {"tool":"mesh.boolean","arguments":{"object":"Ball","operand":"Box","operation":"intersect"}}]
+    },
     .{ .name = "uv_unwrap_smart_torus", .object = "Torus", .ops =
     \\[{"tool":"object.add_primitive","arguments":{"kind":"torus"}},
     \\ {"tool":"mesh.uv_unwrap","arguments":{"object":"Torus"}}]

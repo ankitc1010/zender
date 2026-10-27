@@ -6,3 +6,4 @@ zig-out/
 !docs/**/*.png
 !tests/golden/**/*.png
 coverage/
+zig-pkg/

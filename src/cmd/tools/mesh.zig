@@ -158,6 +158,19 @@ pub const tools = [_]Tool{
         .kind = .mutating,
         .handler = uvUnwrap,
     },
+    .{
+        .name = "mesh.boolean",
+        .title = "Boolean",
+        .description = "Combine a mesh object with another (the operand) in world space: difference cuts the operand away, union joins them, intersect keeps the overlap. Both must be closed solids. Faces keep their UVs, smooth shading and materials; the operand's materials join the object's slots. The operand is then hidden, deleted or kept. The faces from the operand (e.g. the walls of a hole) are the result. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Wall\",\"operand\":\"Window Cutter\",\"operation\":\"difference\"}.",
+        .params = common.mutating(&.{
+            object_param,
+            .{ .name = "operand", .type = .{ .name_ref = .{} }, .doc = "Mesh object to combine with", .required = true },
+            .{ .name = "operation", .type = .{ .enumeration = &.{ "difference", "union", "intersect" } }, .doc = "How to combine", .default = .{ .string = "difference" } },
+            .{ .name = "operand_action", .type = .{ .enumeration = &.{ "hide", "delete", "keep" } }, .doc = "What happens to the operand afterwards", .default = .{ .string = "hide" } },
+        }),
+        .kind = .mutating,
+        .handler = boolean,
+    },
 };
 
 const Target = struct {
@@ -617,6 +630,90 @@ fn uvUnwrap(c: *Call) HandlerError!void {
     try c.field("charts");
     try c.out.write(r.charts);
     try c.say("Unwrapped {d} {s} of '{s}' into {d} chart(s) in UVMap.", .{ faces.len, noun(.face, faces.len), t.name(c), r.charts });
+}
+
+fn boolean(c: *Call) HandlerError!void {
+    const B = geom.ops.boolean;
+    const t = try target(c);
+    _ = try t.editXform(c);
+    const doc = c.doc();
+    const gpa = doc.gpa;
+    const oh = try c.object("operand");
+    if (oh.eql(t.ob)) return c.failAt(.invalid_argument, "/operand", "pick another object to combine with", &.{}, "an object cannot be combined with itself", .{});
+    const ob2 = doc.db.get(.object, oh).?;
+    const op_name = try c.arena.dupe(u8, ob2.name.slice());
+    const mh2 = (if (ob2.kind == .mesh) ob2.data else null) orelse {
+        return c.failAt(.invalid_argument, "/operand", "booleans combine mesh objects", &.{}, "'{s}' is a {s}, not a mesh", .{ op_name, @tagName(ob2.kind) });
+    };
+    if (mh2.eql(t.mh)) return c.failAt(.invalid_argument, "/operand", "make the operand a separate copy with object.duplicate (linked: false)", &.{}, "'{s}' and '{s}' share one mesh", .{ t.name(c), op_name });
+    if (!B.available) return c.fail(.invalid_operation, "this build of Zender has no boolean support (it was built with -Dboolean=none)", .{});
+    const world2 = core.edit.worldMatrix(&doc.db, oh) catch return error.OutOfMemory;
+    const op: B.Op = switch (std.meta.stringToEnum(enum { difference, @"union", intersect }, c.args.str("operation").?).?) {
+        .difference => .difference,
+        .@"union" => .union_,
+        .intersect => .intersect,
+    };
+    var failure: B.Failure = .none;
+    var out = B.apply(gpa, .{ .mesh = t.mesh(c), .world = t.world }, .{ .mesh = doc.db.get(.mesh, mh2).?, .world = world2 }, op, &failure) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Unavailable => return c.fail(.invalid_operation, "this build of Zender has no boolean support", .{}),
+        error.BooleanFailed => {
+            const closed = "booleans need closed solids: no holes or loose faces, every edge shared by exactly two faces wound the same way; scene.validate lists open edges";
+            return switch (failure) {
+                .not_manifold_target => c.failAt(.invalid_argument, "/object", closed, &.{}, "'{s}' is not a closed solid", .{t.name(c)}),
+                .not_manifold_operand => c.failAt(.invalid_argument, "/operand", closed, &.{}, "'{s}' is not a closed solid", .{op_name}),
+                .invalid_target => c.failAt(.invalid_argument, "/object", "", &.{}, "'{s}' has unusable geometry (non-finite positions)", .{t.name(c)}),
+                .invalid_operand => c.failAt(.invalid_argument, "/operand", "", &.{}, "'{s}' has unusable geometry (non-finite positions)", .{op_name}),
+                .too_large => c.fail(.budget_exceeded, "the boolean result is too large to represent", .{}),
+                .none, .other => c.fail(.internal, "the boolean failed; nothing changed", .{}),
+            };
+        },
+        error.InvalidTopology, error.TooManyAttributes => return c.fail(.internal, "the boolean result could not be stored; nothing changed", .{}),
+    };
+    defer gpa.free(out.from_operand);
+    var stored = false;
+    defer if (!stored) out.mesh.releaseRefs(gpa);
+
+    const m = t.mesh(c);
+    for (m.attrs[0..m.attr_count]) |*a| {
+        const n = a.name.slice();
+        if (!std.mem.eql(u8, n, Mesh.uv_name) and !std.mem.eql(u8, n, "sharp_face") and !std.mem.eql(u8, n, "material_index")) {
+            try c.warn("attribute '{s}' is not carried through booleans and was dropped", .{n});
+        }
+    }
+    const tris = out.mesh.triangleCount();
+    if (tris > m.triangleCount()) try c.spendTriangles(tris - m.triangleCount());
+    out.mesh.name = m.name;
+    m.releaseRefs(gpa);
+    m.* = out.mesh;
+    stored = true;
+    if (m.faceCount() == 0) try c.warn("the result is empty (no overlap, or everything was cut away)", .{});
+    try noteShared(c, t);
+    try c.markChanged(t.mh, m.name.slice());
+
+    const action = std.meta.stringToEnum(enum { hide, delete, keep }, c.args.str("operand_action").?).?;
+    switch (action) {
+        .hide => {
+            ob2.hide_render = true;
+            ob2.hide_viewport = true;
+            try c.markChanged(oh, op_name);
+        },
+        .delete => {
+            var it = doc.db.object.iterator();
+            while (it.next()) |e| if (e.value.parent) |p| if (p.eql(oh)) try c.markChanged(e.handle, e.value.name.slice());
+            core.edit.deleteObject(doc, oh) catch return error.OutOfMemory;
+            try c.markChanged(oh, op_name);
+        },
+        .keep => {},
+    }
+    try writeResult(c, .face, out.from_operand);
+    try writeCounts(c, m);
+    const verb = switch (op) {
+        .difference => "Cut",
+        .union_ => "Joined",
+        .intersect => "Intersected",
+    };
+    try c.say("{s} '{s}' with '{s}' ({s} the operand); it now has {d} verts, {d} faces.", .{ verb, t.name(c), op_name, @tagName(action), m.vertCount(), m.faceCount() });
 }
 
 fn merge(c: *Call) HandlerError!void {
