@@ -1,8 +1,7 @@
 //! Evaluation to the interchange representation: world transforms, evaluated
 //! meshes with normals, and resolved material, camera and light data.
-//!
-//! P0 evaluates everything on each call; P1's depsgraph adds per-ID dirty
-//! flags and an evaluated-mesh cache keyed by input hash (TRD §7).
+//! Objects with modifiers get their own evaluated mesh from the depsgraph,
+//! cached by the hash of its inputs (TRD §7).
 
 const std = @import("std");
 const math = @import("math");
@@ -16,8 +15,12 @@ const Document = core.Document;
 const types = core.types;
 const v = math.vec;
 
+const depsgraph = @import("depsgraph.zig");
+
 const Maps = struct {
     mesh: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    /// Evaluated (modified) meshes, by depsgraph key.
+    evaluated: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     camera: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     light: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     material: std.AutoHashMapUnmanaged(u32, u32) = .empty,
@@ -29,6 +32,10 @@ pub const Context = struct {
     pool: math.Pool,
     /// Evaluated data kept between calls; null evaluates from scratch.
     cache: ?*Cache = null,
+    /// Previews use modifiers' viewport settings, renders and exports
+    /// their render settings.
+    purpose: depsgraph.Purpose = .render,
+    stop: ?geom.editmesh.Stop = null,
 };
 
 const Cache = @import("cache.zig").Cache;
@@ -63,6 +70,7 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
     }
 
     var maps: Maps = .{};
+    var ev: depsgraph.Evaluator = .{ .arena = arena, .doc = doc, .cache = ctx.cache, .purpose = ctx.purpose, .stop = ctx.stop };
     var meshes: std.ArrayList(ir.Mesh) = .empty;
     var cameras: std.ArrayList(ir.Camera) = .empty;
     var lights: std.ArrayList(ir.Light) = .empty;
@@ -80,8 +88,22 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
         var kind: ir.NodeKind = .empty;
         var slots: []?u32 = &.{};
         if (ob.data) |d| switch (ob.kind) {
-            .mesh => if (db.get(.mesh, d)) |m| {
-                kind = .{ .mesh = try meshIndex(arena, ctx, &maps, &meshes, d, m) };
+            .mesh => if (db.get(.mesh, d)) |base| {
+                var m = base;
+                if (depsgraph.hasActive(ob, ctx.purpose)) {
+                    const r = (try ev.evaluate(h)).?;
+                    m = @constCast(r.mesh);
+                    const gop = try maps.evaluated.getOrPut(arena, r.key);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = @intCast(meshes.items.len);
+                        var em = try evaluateMesh(arena, ctx, r.mesh);
+                        em.name = try arena.dupe(u8, base.name.slice());
+                        try meshes.append(arena, em);
+                    }
+                    kind = .{ .mesh = gop.value_ptr.* };
+                } else {
+                    kind = .{ .mesh = try meshIndex(arena, ctx, &maps, &meshes, d, m) };
+                }
                 const mats = m.materials.slice();
                 slots = try arena.alloc(?u32, mats.len);
                 for (mats, 0..) |mh, s| {
@@ -258,12 +280,23 @@ fn lightIndex(arena: Allocator, maps: *Maps, list: *std.ArrayList(ir.Light), h: 
     return gop.value_ptr.*;
 }
 
-/// World-space bounds of one object's evaluated geometry; an object without
-/// geometry contributes its origin.
+/// World-space bounds of one object's evaluated geometry (its modifiers'
+/// render settings applied); an object without geometry contributes its
+/// origin.
 pub fn objectBounds(doc: *Document, h: IdHandle) Allocator.Error!?[2]math.Vec3 {
     const ob = doc.db.get(.object, h) orelse return null;
     const world = try core.edit.worldMatrix(&doc.db, h);
-    if (ob.kind == .mesh) if (ob.data) |d| if (doc.db.get(.mesh, d)) |m| {
+    var arena_state = std.heap.ArenaAllocator.init(doc.gpa);
+    defer arena_state.deinit();
+    var evaluated: ?*const types.Mesh = null;
+    if (ob.kind == .mesh and depsgraph.hasActive(ob, .render)) {
+        var ev: depsgraph.Evaluator = .{ .arena = arena_state.allocator(), .doc = doc, .cache = null, .purpose = .render };
+        if (ev.evaluate(h) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.DeadlineExceeded => null,
+        }) |r| evaluated = r.mesh;
+    }
+    if (ob.kind == .mesh) if (ob.data) |d| if (evaluated orelse doc.db.get(.mesh, d)) |m| {
         const pos = m.positions.slice();
         if (pos.len == 0) return null;
         var lo = v.transformPoint(world, pos[0]);

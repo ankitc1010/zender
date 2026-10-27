@@ -30,11 +30,39 @@ pub const Key = struct {
 pub const Cache = struct {
     gpa: Allocator,
     normals_by_key: std.AutoHashMapUnmanaged(Key, Entry) = .empty,
+    /// Evaluated modifier stacks, by the depsgraph's hash of their inputs.
+    stacks: std.AutoHashMapUnmanaged(u64, Stack) = .empty,
     epoch: u64 = 0,
     hits: u64 = 0,
     misses: u64 = 0,
 
     const Entry = struct { normals: []Vec3, used: u64 };
+
+    pub const Stack = struct {
+        mesh: Mesh,
+        /// One per modifier: what it reported when evaluated.
+        notes: []geom.modifiers.Note,
+        used: u64,
+    };
+
+    pub fn getStack(c: *Cache, key: u64) ?*Stack {
+        const e = c.stacks.getPtr(key) orelse return null;
+        e.used = c.epoch;
+        c.hits += 1;
+        return e;
+    }
+
+    /// Takes ownership of `mesh` and `notes` (allocated with `c.gpa`).
+    pub fn putStack(c: *Cache, key: u64, mesh: Mesh, notes: []geom.modifiers.Note) Allocator.Error!*Stack {
+        c.misses += 1;
+        const gop = try c.stacks.getOrPut(c.gpa, key);
+        if (gop.found_existing) {
+            gop.value_ptr.mesh.releaseRefs(c.gpa);
+            c.gpa.free(gop.value_ptr.notes);
+        }
+        gop.value_ptr.* = .{ .mesh = mesh, .notes = notes, .used = c.epoch };
+        return gop.value_ptr;
+    }
 
     pub fn init(gpa: Allocator) Cache {
         return .{ .gpa = gpa };
@@ -44,6 +72,12 @@ pub const Cache = struct {
         var it = c.normals_by_key.valueIterator();
         while (it.next()) |e| c.gpa.free(e.normals);
         c.normals_by_key.deinit(c.gpa);
+        var sit = c.stacks.valueIterator();
+        while (sit.next()) |e| {
+            e.mesh.releaseRefs(c.gpa);
+            c.gpa.free(e.notes);
+        }
+        c.stacks.deinit(c.gpa);
     }
 
     /// Drops every entry, e.g. after a call was stopped part-way, when some
@@ -51,6 +85,7 @@ pub const Cache = struct {
     pub fn clear(c: *Cache) void {
         c.deinit();
         c.normals_by_key = .empty;
+        c.stacks = .empty;
     }
 
     /// Starts an evaluation; entries not touched before `sweep` are freed.
@@ -74,6 +109,32 @@ pub const Cache = struct {
 
     /// Frees entries the current evaluation did not use.
     pub fn sweep(c: *Cache) void {
+        c.sweepStacks();
+        c.sweepNormals();
+    }
+
+    fn sweepStacks(c: *Cache) void {
+        while (true) {
+            var stale: [64]u64 = undefined;
+            var n: usize = 0;
+            var it = c.stacks.iterator();
+            while (it.next()) |e| {
+                if (e.value_ptr.used != c.epoch) {
+                    stale[n] = e.key_ptr.*;
+                    n += 1;
+                    if (n == stale.len) break;
+                }
+            }
+            if (n == 0) return;
+            for (stale[0..n]) |k| {
+                var kv = c.stacks.fetchRemove(k).?;
+                kv.value.mesh.releaseRefs(c.gpa);
+                c.gpa.free(kv.value.notes);
+            }
+        }
+    }
+
+    fn sweepNormals(c: *Cache) void {
         var it = c.normals_by_key.iterator();
         var stale: [64]Key = undefined;
         while (true) {

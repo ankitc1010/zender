@@ -126,6 +126,25 @@ pub fn write(arena: Allocator, doc: *Document, w: *Stringify, opts: Options) Err
         }
         try w.objectField("properties");
         try registry.writeStoredValues(types.Object, ob, w);
+        const mods = ob.modifiers.slice();
+        if (mods.len > 0) {
+            // Stack order is evaluation order, so it is kept as is.
+            try w.objectField("modifiers");
+            try w.beginArray();
+            for (mods) |*m| {
+                try w.beginObject();
+                try w.objectField("name");
+                try w.write(m.name.slice());
+                try w.objectField("type");
+                try w.write(@tagName(m.kind));
+                try w.objectField("target");
+                try writeRef(w, db, .object, m.target);
+                try w.objectField("properties");
+                try registry.writeStoredValues(types.Modifier, m, w);
+                try w.endObject();
+            }
+            try w.endArray();
+        }
         try w.endObject();
     }
     try w.endArray();

@@ -15,7 +15,7 @@ pub const tools = [_]Tool{
         .title = "Describe properties",
         .description = "List every property of a datablock type with its kind, unit, range, default and meaning, as accepted by set_properties, material.create and friends. Angles are degrees at this boundary. Example: {\"type\":\"light\"}.",
         .params = &.{
-            .{ .name = "type", .type = .{ .enumeration = &.{ "object", "collection", "camera", "light", "material", "world", "scene" } }, .doc = "Datablock type", .required = true },
+            .{ .name = "type", .type = .{ .enumeration = &.{ "object", "modifier", "collection", "camera", "light", "material", "world", "scene" } }, .doc = "Datablock type", .required = true },
         },
         .kind = .global,
         .idempotent = true,
@@ -41,6 +41,8 @@ fn describe(c: *Call) HandlerError!void {
     try c.field("properties");
     if (std.mem.eql(u8, t, "object")) {
         try core.registry.writeDescription(core.types.Object, &c.out);
+    } else if (std.mem.eql(u8, t, "modifier")) {
+        try core.registry.writeDescription(core.types.Modifier, &c.out);
     } else if (std.mem.eql(u8, t, "collection")) {
         try core.registry.writeDescription(core.types.Collection, &c.out);
     } else if (std.mem.eql(u8, t, "camera")) {

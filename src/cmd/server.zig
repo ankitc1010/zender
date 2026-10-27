@@ -165,9 +165,15 @@ pub const Call = struct {
     }
 
     /// The scene evaluated to interchange form, reusing cached results.
+    /// The scene evaluated for export (modifiers' render settings).
     pub fn evaluate(c: *Call) HandlerError!engine.ir.Scene {
+        return c.evaluateFor(.render);
+    }
+
+    pub fn evaluateFor(c: *Call, purpose: engine.eval.depsgraph.Purpose) HandlerError!engine.ir.Scene {
         const e = c.entry.?;
-        return engine.eval.flatten.flatten(c.arena, &e.doc, .{ .pool = c.server.pool, .cache = &e.eval_cache }) catch |err| switch (err) {
+        const stop: ?engine.geom.editmesh.Stop = if (c.server.pool.deadline) |d| .{ .deadline = d, .io = c.server.io } else null;
+        return engine.eval.flatten.flatten(c.arena, &e.doc, .{ .pool = c.server.pool, .cache = &e.eval_cache, .purpose = purpose, .stop = stop }) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             // Past the wall-time budget; callInner reports it.
             error.DeadlineExceeded => error.ToolFailed,

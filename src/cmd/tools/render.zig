@@ -43,7 +43,7 @@ fn preview(c: *Call) HandlerError!void {
     const e = c.entry.?;
     const doc = &e.doc;
     const scene_data = doc.sceneData();
-    const scene = try c.evaluate();
+    const scene = try c.evaluateFor(.viewport);
 
     // Size: explicit, or long edge 512 at the scene aspect.
     const rx: f32 = @floatFromInt(scene_data.resolution_x);

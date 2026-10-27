@@ -162,6 +162,37 @@ const ops_cases = [_]OpsCase{
     \\ {"tool":"mesh.boolean","arguments":{"object":"Ball","operand":"Bump","operation":"union","operand_action":"delete"}},
     \\ {"tool":"mesh.smooth","arguments":{"object":"Ball","selector":{"domain":"vert","sphere":{"center":[0,-1,0],"radius":0.5}},"iterations":8,"falloff":0.3}}]
     },
+    .{ .name = "modifier_mirror_subdivision", .object = "Cube", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube"}},
+    \\ {"tool":"mesh.loop_cut","arguments":{"object":"Cube","selector":{"domain":"edge","direction":[1,0,0],"within":5}}},
+    \\ {"tool":"mesh.transform_elements","arguments":{"object":"Cube","selector":{"domain":"vert","where":"x > 0.5"},"scale":[1,1.4,0.6]}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Cube","type":"mirror"}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Cube","type":"subdivision","properties":{"levels":2}}},
+    \\ {"tool":"modifier.apply","arguments":{"object":"Cube"}}]
+    },
+    .{ .name = "modifier_array_solidify_bevel", .object = "Plane", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"plane","size":1}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Plane","type":"array","properties":{"count":4,"constant_offset":[0.2,0,0]}}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Plane","type":"solidify","properties":{"thickness":0.3,"offset":0}}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Plane","type":"bevel","properties":{"width":0.03,"segments":2}}},
+    \\ {"tool":"modifier.apply","arguments":{"object":"Plane"}}]
+    },
+    .{ .name = "modifier_displace_decimate_triangulate", .object = "Sphere", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"uv_sphere","segments":32,"rings":16}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Sphere","type":"displace","properties":{"texture":"noise","strength":0.3,"noise_scale":0.5,"noise_seed":7}}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Sphere","type":"decimate","properties":{"ratio":0.4}}},
+    \\ {"tool":"modifier.apply","arguments":{"object":"Sphere"}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"cylinder","name":"Can","segments":12}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Can","type":"triangulate","properties":{"ngon_method":"clip"}}},
+    \\ {"tool":"modifier.apply","arguments":{"object":"Can","modifier":"Triangulate"}}]
+    },
+    .{ .name = "modifier_boolean_array_target", .object = "Slab", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube","name":"Slab","scale":[3,1,0.2]}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"cylinder","name":"Drill","radius":0.3,"depth":2,"segments":16,"location":[-2,0,0]}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Drill","type":"array","properties":{"count":4,"relative_offset":[0,0,0],"constant_offset":[1.3,0,0]}}},
+    \\ {"tool":"modifier.add","arguments":{"object":"Slab","type":"boolean","target":"Drill"}},
+    \\ {"tool":"modifier.apply","arguments":{"object":"Slab"}}]
+    },
     .{ .name = "uv_unwrap_smart_torus", .object = "Torus", .ops =
     \\[{"tool":"object.add_primitive","arguments":{"kind":"torus"}},
     \\ {"tool":"mesh.uv_unwrap","arguments":{"object":"Torus"}}]

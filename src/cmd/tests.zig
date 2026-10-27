@@ -546,6 +546,51 @@ test "soft selection and smoothing" {
     try testing.expectEqual(@as(i64, 10), border.object.get("count").?.integer);
 }
 
+test "modifier stack: add, validate, cycles, evaluate, export, apply, undo" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\"}}", .{id}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Cutter\",\"location\":[1,1,1],\"size\":1}}", .{id}));
+
+    // Render levels (2) set the evaluated counts; the mesh stays 6 faces.
+    const sub = try f.ok("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"type\":\"subdivision\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 96), sub.object.get("evaluated").?.object.get("faces").?.integer);
+    const mir = try f.ok("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"type\":\"mirror\",\"properties\":{{\"count\":3}}}}", .{id}));
+    try testing.expect(std.mem.indexOf(u8, mir.object.get("warnings").?.array.items[0].string, "no effect") != null);
+
+    const no_target = try f.call("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"type\":\"boolean\"}}", .{id}));
+    try testing.expectEqualStrings("/target", no_target.tool_error.path);
+    const bad_prop = try f.call("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"type\":\"array\",\"properties\":{{\"count\":0}}}}", .{id}));
+    try testing.expectEqualStrings("/properties/count", bad_prop.tool_error.path);
+    _ = try f.ok("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"type\":\"boolean\",\"target\":\"Cutter\"}}", .{id}));
+    const cycle = try f.call("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Cutter\",\"type\":\"array\",\"target\":\"Box\"}}", .{id}));
+    try testing.expect(std.mem.indexOf(u8, cycle.tool_error.message, "Cutter -> Box -> Cutter") != null);
+
+    const upd = try f.ok("modifier.update", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"modifier\":\"Subdivision\",\"properties\":{{\"levels\":0,\"render_levels\":0}},\"index\":2}}", .{id}));
+    try testing.expectEqualStrings("Subdivision", upd.object.get("stack").?.array.items[2].object.get("name").?.string);
+    _ = try f.ok("modifier.remove", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"modifier\":\"Mirror\"}}", .{id}));
+    const missing = try f.call("modifier.remove", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"modifier\":\"Mirror\"}}", .{id}));
+    try testing.expectEqual(server_mod.ErrorCode.not_found, missing.tool_error.code);
+
+    // Previews and exports see the stack: the boolean notch adds faces.
+    _ = try f.ok("camera.add", try f.fmt("{{\"scene_id\":\"{s}\",\"location\":[5,-5,4],\"look_at\":[0,0,0]}}", .{id}));
+    _ = try f.ok("render.preview", try f.fmt("{{\"scene_id\":\"{s}\",\"width\":64,\"height\":48}}", .{id}));
+    const exp = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"box.glb\"}}", .{id}));
+    try testing.expect(exp.object.get("triangles").?.integer > 24);
+
+    const desc = try f.ok("schema.describe", "{\"type\":\"modifier\"}");
+    try testing.expect(desc.object.get("properties").?.array.items.len > 20);
+
+    const applied = try f.ok("modifier.apply", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\"}}", .{id}));
+    try testing.expectEqual(@as(usize, 0), applied.object.get("stack").?.array.items.len);
+    try testing.expectEqual(@as(i64, 9), applied.object.get("counts").?.object.get("faces").?.integer);
+    _ = try f.ok("scene.undo", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
+    const back = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 6), back.object.get("count").?.integer);
+}
+
 fn schemaNumber(v: Value) f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),

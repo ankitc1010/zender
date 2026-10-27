@@ -153,6 +153,14 @@ pub fn writeObjectSummary(c: *Call, w: *std.json.Stringify, h: IdHandle) Handler
         try w.objectField("hide_render");
         try w.write(true);
     }
+    const mods = ob.modifiers.slice();
+    if (mods.len > 0) {
+        // Names only; bounds below are of the evaluated result.
+        try w.objectField("modifiers");
+        try w.beginArray();
+        for (mods) |*m| try w.write(m.name.slice());
+        try w.endArray();
+    }
     if (try engine.eval.flatten.objectBounds(doc, h)) |b| {
         if (ob.kind == .mesh) {
             try w.objectField("bounds");

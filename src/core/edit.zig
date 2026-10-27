@@ -330,6 +330,8 @@ pub fn duplicateObject(doc: *Document, ob_h: IdHandle, name: []const u8, linked:
     };
     var copy = src;
     copy.data = data;
+    copy.modifiers = src.modifiers.retain();
+    errdefer copy.modifiers.release(doc.gpa);
     const h = try doc.db.create(.object, name, copy);
     // The copy joins the source's collections, as in Blender.
     var linked_any = false;

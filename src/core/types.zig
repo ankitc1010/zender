@@ -91,6 +91,9 @@ pub const Object = struct {
     scale: Vec3 = .{ 1, 1, 1 },
     hide_render: bool = false,
     hide_viewport: bool = false,
+    /// Evaluated in order on the object's mesh data (TRD §7); the data
+    /// itself stays as it is.
+    modifiers: Shared(Modifier) = .empty,
 
     pub const props = [_]Prop{
         .{ .name = "type", .field = "kind", .kind = .enumeration, .read_only = true, .doc = "Object type, set at creation", .blend = "type" },
@@ -115,8 +118,107 @@ pub const Object = struct {
         return math.vec.matMul(o.parent_inverse, math.vec.compose(o.location, o.rotation(), o.scale));
     }
 
-    pub fn retainRefs(_: *Object) void {}
-    pub fn releaseRefs(_: *Object, _: Allocator) void {}
+    pub fn retainRefs(o: *Object) void {
+        _ = o.modifiers.retain();
+    }
+    pub fn releaseRefs(o: *Object, gpa: Allocator) void {
+        o.modifiers.release(gpa);
+    }
+};
+
+pub const ModifierKind = enum { array, mirror, solidify, subdivision, bevel, boolean, displace, decimate, triangulate };
+pub const SubdivisionType = enum { catmull_clark, simple };
+pub const BooleanOperation = enum { difference, @"union", intersect };
+pub const DisplaceTexture = enum { none, noise };
+pub const QuadMethod = enum { beauty, fixed, alternate, shortest_diagonal, longest_diagonal };
+pub const NgonMethod = enum { beauty, clip };
+
+/// One entry of an object's modifier stack, Blender's modifiers by name and
+/// defaults. Settings for every kind live side by side; each kind reads its
+/// own (the registry docs say which).
+pub const Modifier = struct {
+    name: Name = .{},
+    kind: ModifierKind = .array,
+    show_viewport: bool = true,
+    show_render: bool = true,
+    /// The object the modifier reads: boolean operand, mirror centre, array
+    /// offset. Set through modifier tools, not as a property.
+    target: ?IdHandle = null,
+
+    count: i32 = 2,
+    relative_offset: Vec3 = .{ 1, 0, 0 },
+    constant_offset: Vec3 = .{ 0, 0, 0 },
+    axis_x: bool = true,
+    axis_y: bool = false,
+    axis_z: bool = false,
+    merge: bool = true,
+    merge_threshold: f32 = 0.001,
+    thickness: f32 = 0.01,
+    offset: f32 = -1,
+    levels: i32 = 1,
+    render_levels: i32 = 2,
+    subdivision_type: SubdivisionType = .catmull_clark,
+    width: f32 = 0.1,
+    segments: i32 = 1,
+    angle_limit: f32 = std.math.pi / 6.0,
+    operation: BooleanOperation = .difference,
+    strength: f32 = 1,
+    mid_level: f32 = 0.5,
+    texture: DisplaceTexture = .none,
+    noise_scale: f32 = 1,
+    noise_seed: i32 = 0,
+    ratio: f32 = 0.5,
+    quad_method: QuadMethod = .beauty,
+    ngon_method: NgonMethod = .beauty,
+
+    pub const props = [_]Prop{
+        .{ .name = "show_viewport", .field = "show_viewport", .kind = .bool, .doc = "Evaluate in previews", .blend = "mode" },
+        .{ .name = "show_render", .field = "show_render", .kind = .bool, .doc = "Evaluate for renders and exports", .blend = "mode" },
+        .{ .name = "count", .field = "count", .kind = .int, .min = 1, .max = 1000, .doc = "array: copies in all, the original included", .blend = "count" },
+        .{ .name = "relative_offset", .field = "relative_offset", .kind = .vec3, .min = -1e6, .max = 1e6, .doc = "array: step between copies in multiples of the mesh's size", .blend = "scale" },
+        .{ .name = "constant_offset", .field = "constant_offset", .kind = .vec3, .unit = .length, .min = -1e9, .max = 1e9, .doc = "array: extra step between copies", .blend = "offset" },
+        .{ .name = "axis_x", .field = "axis_x", .kind = .bool, .doc = "mirror: across the local YZ plane", .blend = "flag" },
+        .{ .name = "axis_y", .field = "axis_y", .kind = .bool, .doc = "mirror: across the local XZ plane", .blend = "flag" },
+        .{ .name = "axis_z", .field = "axis_z", .kind = .bool, .doc = "mirror: across the local XY plane", .blend = "flag" },
+        .{ .name = "merge", .field = "merge", .kind = .bool, .doc = "mirror, array: weld vertices that meet", .blend = "flag" },
+        .{ .name = "merge_threshold", .field = "merge_threshold", .kind = .float, .unit = .length, .min = 0, .max = 1e6, .doc = "mirror, array: weld distance", .blend = "tolerance" },
+        .{ .name = "thickness", .field = "thickness", .kind = .float, .unit = .length, .min = -1e6, .max = 1e6, .doc = "solidify: shell thickness", .blend = "offset" },
+        .{ .name = "offset", .field = "offset", .kind = .float, .min = -1, .max = 1, .doc = "solidify: -1 grows inward, 1 outward, 0 both ways", .blend = "offset_fac" },
+        .{ .name = "levels", .field = "levels", .kind = .int, .min = 0, .max = 6, .doc = "subdivision: levels in previews", .blend = "levels" },
+        .{ .name = "render_levels", .field = "render_levels", .kind = .int, .min = 0, .max = 6, .doc = "subdivision: levels for renders and exports", .blend = "renderLevels" },
+        .{ .name = "subdivision_type", .field = "subdivision_type", .kind = .enumeration, .doc = "subdivision: catmull_clark smooths, simple only splits", .blend = "subdivType" },
+        .{ .name = "width", .field = "width", .kind = .float, .unit = .length, .min = 0, .max = 1e6, .doc = "bevel: offset from each edge", .blend = "value" },
+        .{ .name = "segments", .field = "segments", .kind = .int, .min = 1, .max = 64, .doc = "bevel: faces across each bevel", .blend = "res" },
+        .{ .name = "angle_limit", .field = "angle_limit", .kind = .float, .unit = .angle, .min = 0, .max = std.math.pi, .doc = "bevel: only edges whose faces meet at more than this", .blend = "bevel_angle" },
+        .{ .name = "operation", .field = "operation", .kind = .enumeration, .doc = "boolean: what to do with the target", .blend = "operation" },
+        .{ .name = "strength", .field = "strength", .kind = .float, .unit = .length, .min = -1e6, .max = 1e6, .doc = "displace: distance along the normal at full texture value", .blend = "strength" },
+        .{ .name = "mid_level", .field = "mid_level", .kind = .float, .min = 0, .max = 1, .doc = "displace: texture value that stays in place", .blend = "midlevel" },
+        .{ .name = "texture", .field = "texture", .kind = .enumeration, .doc = "displace: none (uniform) or noise", .blend = "texture" },
+        .{ .name = "noise_scale", .field = "noise_scale", .kind = .float, .unit = .length, .min = 1e-4, .max = 1e6, .doc = "displace: size of the noise features" },
+        .{ .name = "noise_seed", .field = "noise_seed", .kind = .int, .min = 0, .max = 1000000, .doc = "displace: noise variation" },
+        .{ .name = "ratio", .field = "ratio", .kind = .float, .min = 0, .max = 1, .doc = "decimate: share of triangles to keep", .blend = "percent" },
+        .{ .name = "quad_method", .field = "quad_method", .kind = .enumeration, .doc = "triangulate: how quads split", .blend = "quad_method" },
+        .{ .name = "ngon_method", .field = "ngon_method", .kind = .enumeration, .doc = "triangulate: how n-gons split", .blend = "ngon_method" },
+    };
+
+    /// Blender's defaults where they differ by kind.
+    pub fn defaults(kind: ModifierKind) Modifier {
+        var m: Modifier = .{ .kind = kind };
+        switch (kind) {
+            .array => m.merge = false,
+            else => {},
+        }
+        return m;
+    }
+
+    /// Whether the modifier reads a target object, and whether it must.
+    pub fn targetUse(kind: ModifierKind) enum { none, optional, required } {
+        return switch (kind) {
+            .boolean => .required,
+            .mirror, .array => .optional,
+            else => .none,
+        };
+    }
 };
 
 pub const Domain = enum { point, edge, face, corner };

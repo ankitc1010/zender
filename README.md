@@ -4,7 +4,7 @@ A headless 3D scene engine in Zig that LLM agents drive through the Model Contex
 
 Zender borrows Blender's concepts (datablocks, an RNA-style property registry, Blender's primitives and defaults) but is an independent implementation, not a fork. The design is in the [technical requirements document](https://claude.ai/artifact/6DEysg565wv9dJ7wv7XRQi).
 
-**Status: P0 (Foundations) done, P1 (Modeling) under way; version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, group them in collections, edit meshes element by element (select, extrude, inset, loop cut, bevel, triangulate, merge, transform), combine them with booleans, UV-unwrap them, look at them with a preview renderer, export glTF 2.0, OBJ, STL, PLY or a canonical `scene.json`, and import OBJ, STL and PLY. Modifiers and `.blend` I/O come next (see [Roadmap](#roadmap)).
+**Status: P0 (Foundations) done, P1 (Modeling) under way; version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, group them in collections, edit meshes element by element (select, extrude, inset, loop cut, bevel, triangulate, merge, transform), combine them with booleans, stack non-destructive modifiers on them (array, mirror, solidify, subdivision, bevel, boolean, displace, decimate, triangulate), UV-unwrap them, look at them with a preview renderer, export glTF 2.0, OBJ, STL, PLY or a canonical `scene.json`, and import OBJ, STL and PLY. `.blend` I/O comes next (see [Roadmap](#roadmap)).
 
 ## Build
 
@@ -55,6 +55,7 @@ Observability: `serve` writes one JSON log line per tool call to stderr (`--log-
 | Scene | `scene.create`, `scene.inspect`, `scene.validate`, `scene.undo`, `scene.redo`, `scene.apply`, `scene.close` |
 | Object | `object.add_primitive`, `object.duplicate`, `object.delete`, `object.transform`, `object.set_parent`, `object.set_properties` |
 | Mesh | `mesh.select_preview`, `mesh.transform_elements`, `mesh.extrude`, `mesh.inset`, `mesh.triangulate`, `mesh.merge`, `mesh.loop_cut`, `mesh.bevel`, `mesh.uv_unwrap`, `mesh.boolean`, `mesh.smooth` |
+| Modifier | `modifier.add`, `modifier.update`, `modifier.remove`, `modifier.apply` |
 | Collection | `collection.create`, `collection.update`, `collection.delete` |
 | Shading | `material.create`, `material.update`, `material.assign`, `world.set` |
 | Camera and light | `camera.add`, `camera.look_at`, `camera.frame_objects`, `light.add` |
@@ -68,7 +69,7 @@ Every call names its scene with the `scene_id` that `scene.create` returns. Muta
 
 Mesh tools take a **selector** instead of a stored selection, since an agent cannot click. A selector is one JSON object whose keys must all hold: `domain` (face, edge or vert), `index` (indices and `[first, last]` ranges), `where` (`"z > 0.5"`, `"abs(x) < 0.1"`, `"material_index == 1"`), `box`, `sphere`, `normal` with `within` degrees, `direction` (edges running along an axis, either way, with the same `within`), and `union` / `intersect` / `subtract` of nested selectors. Positions and normals are in world space unless `space` is `local`. Each tool returns a `result` selector for the elements it leaves selected (the extruded caps, the inset faces), so the next call can use it as is. Offsets and distances are world metres, as `scene.inspect` reports bounds. Every result is validated (FR-GEO-3); new winding conflicts or zero-area faces come back as warnings. Long operators stop at the call's wall-time budget and change nothing.
 
-`mesh.transform_elements` takes a soft-selection `falloff` (radius, curve, straight or along edges), and `mesh.smooth` relaxes vertices without shrinking them (Taubin), for organic shapes. `mesh.boolean` unions, subtracts or intersects two closed meshes through [Manifold](https://github.com/elalish/manifold) (Apache-2.0), keeping UVs, smooth shading and material slots; the operand is hidden, deleted or kept. `mesh.uv_unwrap` splits faces into charts (smart: by seams and normal angle; conformal: by seams only), flattens each with least-squares conformal maps, scales them to one texel density and packs them into 0..1. `io.export` writes OBJ (+ MTL), STL and PLY as Blender's exporters do by default (OBJ Y-up, world transforms applied); `io.import` reads them back, keeping n-gons, UVs, material slots and smooth shading, and lists whatever it could not carry.
+Modifiers change what previews (viewport settings) and exports (render settings) see, not the mesh, until `modifier.apply`. A depsgraph evaluates objects that other objects' modifiers read (boolean operands, mirror centres, array offsets) first, caches each result under a hash of its inputs, and refuses targets that would make a cycle, naming the path. `mesh.transform_elements` takes a soft-selection `falloff` (radius, curve, straight or along edges), and `mesh.smooth` relaxes vertices without shrinking them (Taubin), for organic shapes. `mesh.boolean` unions, subtracts or intersects two closed meshes through [Manifold](https://github.com/elalish/manifold) (Apache-2.0), keeping UVs, smooth shading and material slots; the operand is hidden, deleted or kept. `mesh.uv_unwrap` splits faces into charts (smart: by seams and normal angle; conformal: by seams only), flattens each with least-squares conformal maps, scales them to one texel density and packs them into 0..1. `io.export` writes OBJ (+ MTL), STL and PLY as Blender's exporters do by default (OBJ Y-up, world transforms applied); `io.import` reads them back, keeping n-gons, UVs, material slots and smooth shading, and lists whatever it could not carry.
 
 `render.preview` returns the image inline (long edge ≤ 1024 px), a `zender://scene/{id}/render/{job}` link to the full-size PNG, and which objects are visible and how many pixels each covers.
 
@@ -96,9 +97,9 @@ Five layers; `build.zig` gives each module imports only from lower layers, so an
 
 ## Testing
 
-`zig build test` runs 112 tests: math, data model, collections, undo, scene.json, primitives, normals, EditMesh, selectors, the mesh operators and UV unwrapping, OBJ/STL/PLY reading and writing, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG encode and decode, glTF export, path confinement, budgets and tracing, the command core end to end, command-log replay, the MCP protocol, and two golden suites:
+`zig build test` runs 119 tests: math, data model, collections, undo, scene.json, primitives, normals, EditMesh, selectors, the mesh operators and UV unwrapping, OBJ/STL/PLY reading and writing, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG encode and decode, glTF export, path confinement, budgets and tracing, the command core end to end, command-log replay, the MCP protocol, and two golden suites:
 
-- **Golden geometry** (`tests/golden/geometry.json`, `tests/golden/mesh_ops.json`): 12 primitive cases and 26 mesh-operator cases, each a short `scene.apply` op list. Counts and a digest of the connectivity must match exactly. Bounds, area, volume and UV sums must match within a tolerance, because trigonometry may differ in the last bit between platforms' libm.
+- **Golden geometry** (`tests/golden/geometry.json`, `tests/golden/mesh_ops.json`): 12 primitive cases and 30 mesh-operator and modifier cases, each a short `scene.apply` op list. Counts and a digest of the connectivity must match exactly. Bounds, area, volume and UV sums must match within a tolerance, because trigonometry may differ in the last bit between platforms' libm.
 - **Golden render** (`tests/golden/render/`): 5 previews replayed from command logs, compared by PSNR (≥ 40 dB) and the share of pixels off by more than 8 levels (≤ 0.2%).
 
 The official MCP conformance suite tests servers over HTTP only, so it joins CI with Streamable HTTP in P3. Until then `scripts/inspector-session.sh` drives the server with MCP Inspector over stdio in both protocol eras, with `--strict` schema checks. Still to come: FLIP for renders, Blender parity, fuzzing, benchmark gates and agent evaluation.
@@ -121,7 +122,7 @@ Measured on a phone (MediaTek Dimensity 9400, 8 cores, ReleaseSafe). The TRD's t
 | Bevel on a 50,176-face sphere | 139 ms (half the edges), 379 ms (all 100 k edges) | ≤ 200 ms |
 | UV unwrap of a 100,489-face sphere | 12.7 s (conjugate gradients converge slowly on large curved charts; needs a preconditioner) | ≤ 200 ms |
 | Binary size (ReleaseSafe, not stripped; Manifold and libc++ linked, Manifold without debug info) | 13.8 MB | ≤ 30 MB |
-| `tools/list` payload (MCP response, 39 tools) | 48.7 KB | ≤ 40 KB (hard cap raised to 60 KB) |
+| `tools/list` payload (MCP response, 44 tools) | 55.8 KB | ≤ 40 KB (hard cap raised to 60 KB) |
 | Idle RSS (`scripts/measure-memory.mjs`) | 1.5 MB | ≤ 30 MB |
 | RSS over mesh bytes, 1 M-triangle scene after a preview | 1.55× | ≤ 2.5× |
 
