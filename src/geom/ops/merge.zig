@@ -55,13 +55,26 @@ pub fn merge(em: *EditMesh, gpa: Allocator, verts: []const u32, xf: Xform, p: Pa
                     if (e == first) break;
                 }
             }
-            var group: std.ArrayList(u32) = .empty;
-            defer group.deinit(gpa);
+            // Bucket the slots by root (a counting sort keeps index order
+            // within each group), then collapse the groups in root order.
+            const start = try gpa.alloc(u32, verts.len + 1);
+            defer gpa.free(start);
+            @memset(start, 0);
+            for (0..verts.len) |i| start[find(parent, @intCast(i)) + 1] += 1;
+            for (1..start.len) |i| start[i] += start[i - 1];
+            const members = try gpa.alloc(u32, verts.len);
+            defer gpa.free(members);
+            const fill = try gpa.dupe(u32, start[0..verts.len]);
+            defer gpa.free(fill);
+            for (verts, 0..) |x, i| {
+                const r = find(parent, @intCast(i));
+                members[fill[r]] = x;
+                fill[r] += 1;
+            }
             for (0..verts.len) |i| {
-                if (find(parent, @intCast(i)) != i) continue;
-                group.clearRetainingCapacity();
-                for (verts, 0..) |x, j| if (find(parent, @intCast(j)) == i) try group.append(gpa, x);
-                if (group.items.len > 1) try collapseGroup(em, gpa, group.items, &target);
+                try em.tick();
+                const group = members[start[i]..start[i + 1]];
+                if (group.len > 1) try collapseGroup(em, gpa, group, &target);
             }
         },
         .distance => try byDistance(em, gpa, verts, xf, @max(p.threshold, 0), &target),
@@ -110,7 +123,7 @@ fn collapseGroup(em: *EditMesh, gpa: Allocator, group: []const u32, target: *std
 
 /// Each vertex, in index order, absorbs the not-yet-merged vertices within
 /// `threshold` of it (world space), as Blender's Merge by Distance does.
-fn byDistance(em: *EditMesh, gpa: Allocator, verts: []const u32, xf: Xform, threshold: f32, target: *std.AutoArrayHashMapUnmanaged(u32, u32)) Allocator.Error!void {
+fn byDistance(em: *EditMesh, gpa: Allocator, verts: []const u32, xf: Xform, threshold: f32, target: *std.AutoArrayHashMapUnmanaged(u32, u32)) Error!void {
     const Cell = [3]i64;
     const cell_size: f64 = @max(threshold, 1e-6);
     const world = try gpa.alloc(Vec3, verts.len);
@@ -151,6 +164,7 @@ fn byDistance(em: *EditMesh, gpa: Allocator, verts: []const u32, xf: Xform, thre
     @memset(taken, false);
     const t2 = threshold * threshold;
     for (verts, 0..) |x, i| {
+        try em.tick();
         if (taken[i]) continue;
         taken[i] = true;
         for ([_]i64{ -1, 0, 1 }) |dx| for ([_]i64{ -1, 0, 1 }) |dy| for ([_]i64{ -1, 0, 1 }) |dz| {
@@ -209,6 +223,7 @@ fn weld(em: *EditMesh, gpa: Allocator, target: *const std.AutoArrayHashMapUnmana
     defer spans.deinit(gpa);
     var degenerate: usize = 0;
     for (faces) |f| {
+        try em.tick();
         const start: u32 = @intCast(corners.items.len);
         const face = em.faces.items[f];
         var l = face.l;

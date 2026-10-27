@@ -16,7 +16,7 @@ const IdHandle = core.IdHandle;
 pub const scene_id: Param = .{
     .name = "scene_id",
     .type = .{ .string = .{ .max_len = 64 } },
-    .doc = "From scene.create",
+    .doc = "",
     .required = true,
     .header = "Scene",
 };
@@ -24,7 +24,7 @@ pub const scene_id: Param = .{
 pub const if_rev: Param = .{
     .name = "if_rev",
     .type = .{ .integer = .{ .min = 0 } },
-    .doc = "Fail with rev_mismatch unless scene_rev equals this",
+    .doc = "Expected scene_rev, else rev_mismatch",
 };
 
 pub const location: Param = .{ .name = "location", .type = .{ .vec3 = .{ .min = -1e9, .max = 1e9, .unit = .metres } }, .doc = "Position [x, y, z], Z up", .default = .{ .vec3 = .{ 0, 0, 0 } } };

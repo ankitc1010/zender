@@ -27,6 +27,12 @@ pub const none = std.math.maxInt(u32);
 
 pub const Error = Allocator.Error || error{ InvalidTopology, TooManyAttributes };
 
+/// The wall-time limit of the tool call an operator runs in (SEC-3).
+pub const Stop = struct {
+    deadline: *math.Deadline,
+    io: std.Io,
+};
+
 pub const Vert = struct {
     co: Vec3,
     /// An edge of the disk cycle around this vertex, or `none` when loose.
@@ -98,6 +104,10 @@ pub const EditMesh = struct {
     faces: std.ArrayList(Face) = .empty,
     /// In the stored mesh's attribute order.
     layers: std.ArrayList(Layer) = .empty,
+    /// Set by the caller; operators then stop part-way with
+    /// error.DeadlineExceeded once it passes, leaving the EditMesh unusable.
+    stop: ?Stop = null,
+    ticks: u32 = 0,
 
     pub fn init(gpa: Allocator) EditMesh {
         return .{ .gpa = gpa };
@@ -309,6 +319,14 @@ pub const EditMesh = struct {
         var n: usize = 0;
         for (em.faces.items) |x| n += @intFromBool(!x.removed);
         return n;
+    }
+
+    /// Operators call this once per element they process (and per step of
+    /// any inner loop that can run long); it reads the clock every 1024 calls.
+    pub fn tick(em: *EditMesh) math.DeadlineError!void {
+        const s = em.stop orelse return;
+        em.ticks +%= 1;
+        if (em.ticks % 1024 == 0 and s.deadline.passed(s.io)) return error.DeadlineExceeded;
     }
 
     // ---- element creation ------------------------------------------------

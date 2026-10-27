@@ -8,6 +8,7 @@ pub const editmesh = @import("editmesh.zig");
 pub const EditMesh = editmesh.EditMesh;
 pub const select = @import("select.zig");
 pub const ops = @import("ops.zig");
+pub const uv = @import("uv.zig");
 
 test {
     _ = build;
@@ -16,4 +17,5 @@ test {
     _ = editmesh;
     _ = select;
     _ = ops;
+    _ = uv;
 }

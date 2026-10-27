@@ -18,6 +18,8 @@ pub const region = @import("ops/region.zig");
 pub const triangulate = @import("ops/triangulate.zig");
 pub const merge = @import("ops/merge.zig");
 pub const transform = @import("ops/transform.zig");
+pub const loopcut = @import("ops/loopcut.zig");
+pub const bevel = @import("ops/bevel.zig");
 
 /// The object's world matrix with the inverses operators need.
 pub const Xform = struct {
@@ -61,16 +63,25 @@ pub const Outcome = struct {
     degenerate_faces: usize = 0,
     /// Vertices removed by merging.
     merged_verts: usize = 0,
+    /// Loop cut: rings cut. Loop cut and bevel: inputs skipped (seeds
+    /// bordering no quad, edges without two faces).
+    rings: usize = 0,
+    skipped: usize = 0,
+    /// Bevel: the width used, after any reduction to avoid overlaps.
+    width_used: f32 = 0,
 
     pub fn deinit(o: *Outcome, gpa: Allocator) void {
         o.selected.deinit(gpa);
     }
 };
 
-pub const Error = @import("editmesh.zig").Error || error{
+pub const Error = @import("editmesh.zig").Error || math.DeadlineError || error{
     /// Moving along the normal was asked for, but the selection has none
     /// (loose vertices or edges, or normals that cancel out).
     NoNormal,
+    /// A vertex of the input lies on a boundary, has more than one fan of
+    /// faces, or has neighbours wound the opposite way (bevel).
+    NonManifold,
 };
 
 test {
@@ -78,4 +89,6 @@ test {
     _ = triangulate;
     _ = merge;
     _ = transform;
+    _ = loopcut;
+    _ = bevel;
 }

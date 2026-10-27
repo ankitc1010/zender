@@ -143,6 +143,7 @@ fn split(em: *EditMesh, gpa: Allocator, faces: []const u32, sides: []const Side,
     var verts: std.ArrayList(u32) = .empty;
     defer verts.deinit(gpa);
     for (faces, spans.items) |f, span| {
+        try em.tick();
         verts.clearRetainingCapacity();
         for (loops.items[span[0]..span[1]]) |l| try verts.append(gpa, out.map(em.loops.items[l].v));
         try out.caps.append(gpa, try em.addFace(verts.items, .{
@@ -199,6 +200,7 @@ fn individual(em: *EditMesh, gpa: Allocator, faces: []const u32, xf: Xform, plac
     try em.reserve(corners, 2 * corners, 5 * corners, corners + faces.len);
     try out.selected.ensureUnusedCapacity(gpa, faces.len);
     for (faces) |f| {
+        try em.tick();
         vs.clearRetainingCapacity();
         ls.clearRetainingCapacity();
         es.clearRetainingCapacity();
@@ -333,6 +335,7 @@ pub fn extrudeEdges(em: *EditMesh, gpa: Allocator, edges: []const u32, xf: Xform
         if (!dups.contains(x)) try dups.put(gpa, x, try em.addVert(v.add(em.verts.items[x].co, d), x));
     };
     for (edges) |e| {
+        try em.tick();
         const ends = em.edges.items[e].v;
         const l = em.edges.items[e].l;
         // Wind the new quad against the edge's first face so the two join
@@ -363,6 +366,7 @@ pub fn extrudeVerts(em: *EditMesh, gpa: Allocator, verts: []const u32, xf: Xform
     var out: Outcome = .{ .domain = .vert };
     errdefer out.deinit(gpa);
     for (verts) |x| {
+        try em.tick();
         const offset_w = p.offset orelse blk: {
             const n = vertNormal(em, x, xf);
             if (v.length(n) < 0.5) return error.NoNormal;
@@ -430,6 +434,7 @@ pub fn inset(em: *EditMesh, gpa: Allocator, faces: []const u32, xf: Xform, p: In
     defer gpa.free(slot);
     @memset(slot, none);
     for (faces) |f| {
+        try em.tick();
         const n = xf.normalToWorld(em.faceNormal(f));
         const face = em.faces.items[f];
         var l = face.l;

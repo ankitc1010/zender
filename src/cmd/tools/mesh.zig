@@ -118,6 +118,46 @@ pub const tools = [_]Tool{
         .kind = .mutating,
         .handler = merge,
     },
+    .{
+        .name = "mesh.loop_cut",
+        .title = "Loop cut",
+        .description = "Add edge loops. Each selected edge picks its ring: the edges met walking across quads from it, to a boundary, non-quad face or non-manifold edge. Ring edges split evenly into cuts + 1 parts and the quads are cut across. The new loop edges are the result; slide them with mesh.transform_elements. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Cube\",\"selector\":{\"domain\":\"edge\",\"direction\":[0,0,1],\"within\":5},\"cuts\":2}.",
+        .params = common.mutating(&.{
+            object_param,
+            selectorParam("edge", true),
+            .{ .name = "cuts", .type = .{ .integer = .{ .min = 1, .max = ops.loopcut.max_cuts } }, .doc = "Loops added per ring", .default = .{ .integer = 1 } },
+        }),
+        .kind = .mutating,
+        .handler = loopCut,
+    },
+    .{
+        .name = "mesh.bevel",
+        .title = "Bevel edges",
+        .description = "Bevel edges: cut each back by width (m, measured in its faces) and replace it with segments faces; 1 is a flat chamfer, more give a round profile, and corners where three or more meet get a round patch. Widths that would overlap are reduced (warning). Edges need two faces and their vertices a closed surface around them. The new faces are the result. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Cube\",\"selector\":{},\"width\":0.1,\"segments\":4}.",
+        .params = common.mutating(&.{
+            object_param,
+            selectorParam("edge", true),
+            .{ .name = "width", .type = .{ .number = .{ .min = 0, .max = 1e6, .unit = .metres } }, .doc = "Offset from each edge", .default = .{ .number = 0.1 } },
+            .{ .name = "segments", .type = .{ .integer = .{ .min = 1, .max = ops.bevel.max_segments } }, .doc = "Faces across each bevel", .default = .{ .integer = 1 } },
+        }),
+        .kind = .mutating,
+        .handler = bevel,
+    },
+    .{
+        .name = "mesh.uv_unwrap",
+        .title = "UV unwrap",
+        .description = "Unwrap faces into the UVMap layer: split into charts, flatten each with least-squares conformal maps, scale to one texel density and pack into 0..1. smart also starts a new chart where faces turn more than angle_limit; conformal cuts only at seams (edges) and mesh borders. Corners of other faces keep their UVs. The faces are the result. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Cylinder\",\"method\":\"conformal\",\"seams\":{\"domain\":\"edge\",\"union\":[{\"where\":\"abs(z) > 0.99\"},{\"index\":[0]}]}}.",
+        .params = common.mutating(&.{
+            object_param,
+            selectorParam("face", false),
+            .{ .name = "method", .type = .{ .enumeration = &.{ "smart", "conformal" } }, .doc = "How charts are found", .default = .{ .string = "smart" } },
+            .{ .name = "angle_limit", .type = .{ .number = .{ .min = 1, .max = 89, .unit = .degrees } }, .doc = "smart: largest normal turn within a chart", .default = .{ .number = 66 } },
+            .{ .name = "seams", .type = .selector, .doc = "Edges to cut along, as a selector (default domain edge)" },
+            .{ .name = "margin", .type = .{ .number = .{ .min = 0, .max = 0.2 } }, .doc = "Gap around charts, fraction of the 0..1 square", .default = .{ .number = 0.01 } },
+        }),
+        .kind = .mutating,
+        .handler = uvUnwrap,
+    },
 };
 
 const Target = struct {
@@ -160,17 +200,24 @@ const Selection = struct {
 };
 
 fn evaluate(c: *Call, t: Target, default_domain: sel.Domain, allow_empty: bool) HandlerError!Selection {
+    return evaluateArg(c, t, "selector", default_domain, allow_empty);
+}
+
+/// Evaluates the selector in argument `arg` (`selector`, or another
+/// selector-typed parameter such as `seams`).
+fn evaluateArg(c: *Call, t: Target, comptime arg: []const u8, default_domain: sel.Domain, allow_empty: bool) HandlerError!Selection {
+    const at = "/" ++ arg;
     var failure: schema.Failure = undefined;
-    const s = (try selector.parse(c.arena, c.args.value("selector"), default_domain, "/selector", &failure)) orelse {
+    const s = (try selector.parse(c.arena, c.args.value(arg), default_domain, at, &failure)) orelse {
         return c.failAt(.invalid_argument, failure.path, failure.hint, failure.valid_values, "{s}", .{failure.message});
     };
     const m = t.mesh(c);
     var diag: sel.Diag = .{};
     const bits = sel.evaluate(c.arena, m, s, t.world, &diag) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.IndexOutOfRange => return c.failAt(.invalid_argument, "/selector", "indices change after topology edits: use the 'result' of the last call, or select by rule", &.{}, "index {d} is out of range: '{s}' has {d} {s}", .{ diag.index, t.name(c), s.domain.count(m), s.domain.plural() }),
-        error.FieldNotInDomain => return c.failAt(.invalid_argument, "/selector/where", "area applies to faces and length to edges; set domain to match", &.{}, "a where comparison does not apply to {s}", .{s.domain.plural()}),
-        error.UnknownAttribute, error.AttributeNotScalar => return c.failAt(.not_found, "/selector", "where compares x y z nx ny nz area length index or a scalar attribute of the selector's domain", try scalarAttributes(c, m, s.domain), "'{s}' is not a scalar {s} attribute of '{s}'", .{ diag.attribute, @tagName(s.domain), t.name(c) }),
+        error.IndexOutOfRange => return c.failAt(.invalid_argument, at, "indices change after topology edits: use the 'result' of the last call, or select by rule", &.{}, "index {d} is out of range: '{s}' has {d} {s}", .{ diag.index, t.name(c), s.domain.count(m), s.domain.plural() }),
+        error.FieldNotInDomain => return c.failAt(.invalid_argument, at ++ "/where", "area applies to faces and length to edges; set domain to match", &.{}, "a where comparison does not apply to {s}", .{s.domain.plural()}),
+        error.UnknownAttribute, error.AttributeNotScalar => return c.failAt(.not_found, at, "where compares x y z nx ny nz area length index or a scalar attribute of the selector's domain", try scalarAttributes(c, m, s.domain), "'{s}' is not a scalar {s} attribute of '{s}'", .{ diag.attribute, @tagName(s.domain), t.name(c) }),
     };
     if (!allow_empty and bits.count() == 0) {
         // A common slip: a vertex's normal averages its faces', so a cube
@@ -179,7 +226,7 @@ fn evaluate(c: *Call, t: Target, default_domain: sel.Domain, allow_empty: bool) 
             "vertex normals average their faces' normals; to pick a face's vertices use domain face with normal, or widen within"
         else
             "check it with mesh.select_preview; positions and normals are in world space unless space is local";
-        return c.failAt(.invalid_argument, "/selector", hint, &.{}, "the selector matched no {s} of '{s}'", .{ s.domain.plural(), t.name(c) });
+        return c.failAt(.invalid_argument, at, hint, &.{}, "the selector matched no {s} of '{s}'", .{ s.domain.plural(), t.name(c) });
     }
     return .{ .s = s, .bits = bits };
 }
@@ -338,7 +385,10 @@ const Edit = struct {
     em: EditMesh,
 
     fn begin(c: *Call, t: Target) HandlerError!Edit {
-        return .{ .em = try load(c, t) };
+        var em = try load(c, t);
+        // Operators stop at the call's wall-time limit (SEC-3).
+        if (c.server.pool.deadline) |d| em.stop = .{ .deadline = d, .io = c.server.io };
+        return .{ .em = em };
     }
 
     fn load(c: *Call, t: Target) HandlerError!EditMesh {
@@ -409,6 +459,8 @@ const Edit = struct {
 fn opFailed(c: *Call, err: ops.Error) HandlerError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
+        // The command core sees the expired deadline and reports it.
+        error.DeadlineExceeded => error.ToolFailed,
         error.NoNormal => c.failAt(.invalid_argument, "/distance", "give offset [x, y, z] instead", &.{}, "the selection has no normal to move along (loose geometry, or normals that cancel)", .{}),
         else => c.fail(.internal, "the operator met inconsistent topology; nothing changed", .{}),
     };
@@ -480,6 +532,91 @@ fn triangulate(c: *Call) HandlerError!void {
     defer out.deinit(c.doc().gpa);
     try e.commit(c, t, &out);
     try c.say("Triangulated {d} {s} of '{s}' into {d} triangles.", .{ faces.len, noun(.face, faces.len), t.name(c), out.selected.items.len });
+}
+
+fn loopCut(c: *Call) HandlerError!void {
+    const t = try target(c);
+    const s = try evaluate(c, t, .edge, false);
+    var edges = try sel.toEdges(c.arena, t.mesh(c), s.s.domain, &s.bits);
+    const seeds = try indices(c, &edges);
+    var e = try Edit.begin(c, t);
+    defer e.deinit();
+    const cuts: u32 = @intCast(c.args.int("cuts").?);
+    var out = ops.loopcut.loopCut(&e.em, c.doc().gpa, seeds, .{ .cuts = cuts }) catch |err| return opFailed(c, err);
+    defer out.deinit(c.doc().gpa);
+    if (out.rings == 0) return c.failAt(.invalid_argument, "/selector", "select an edge between quads, e.g. {\"domain\":\"edge\",\"direction\":[0,0,1]} for a box's vertical edges", &.{}, "none of the {d} selected edges borders a quad, so there is no ring to cut", .{seeds.len});
+    if (out.skipped > 0) try c.warn("{d} selected edge(s) border no quad and were skipped", .{out.skipped});
+    try e.commit(c, t, &out);
+    const m = t.mesh(c);
+    try c.say("Cut {d} ring(s) of '{s}' with {d} loop(s) each; it now has {d} verts, {d} faces.", .{ out.rings, t.name(c), cuts, m.vertCount(), m.faceCount() });
+}
+
+fn bevel(c: *Call) HandlerError!void {
+    const t = try target(c);
+    const xf = try t.editXform(c);
+    const s = try evaluate(c, t, .edge, false);
+    var edges = try sel.toEdges(c.arena, t.mesh(c), s.s.domain, &s.bits);
+    const list = try indices(c, &edges);
+    const width = c.args.float("width").?;
+    var e = try Edit.begin(c, t);
+    defer e.deinit();
+    var out = ops.bevel.bevel(&e.em, c.doc().gpa, list, xf, .{
+        .width = width,
+        .segments = @intCast(c.args.int("segments").?),
+    }) catch |err| switch (err) {
+        error.NonManifold => return c.failAt(.invalid_argument, "/selector", "bevel edges of closed surfaces (box, cylinder, sphere); fix flipped faces first, or check the mesh with scene.validate", &.{}, "a vertex of the selected edges lies on an open boundary, joins more than one fan of faces, or sits between faces wound opposite ways", .{}),
+        else => return opFailed(c, err),
+    };
+    defer out.deinit(c.doc().gpa);
+    if (out.selected.items.len == 0) return c.failAt(.invalid_argument, "/selector", "bevel works on edges between two faces", &.{}, "none of the {d} selected edges has exactly two faces", .{list.len});
+    if (out.skipped > 0) try c.warn("{d} selected edge(s) without exactly two faces were skipped", .{out.skipped});
+    if (out.width_used < width) try c.warn("width reduced from {d:.4} to {d:.4} m so the cuts of neighbouring edges do not cross", .{ width, out.width_used });
+    try e.commit(c, t, &out);
+    try c.field("width");
+    try c.out.write(out.width_used);
+    const m = t.mesh(c);
+    try c.say("Bevelled {d} edge(s) of '{s}' by {d:.3} m; it now has {d} verts, {d} faces.", .{ list.len - out.skipped, t.name(c), out.width_used, m.vertCount(), m.faceCount() });
+}
+
+fn uvUnwrap(c: *Call) HandlerError!void {
+    const t = try target(c);
+    const s = try evaluate(c, t, .face, false);
+    const faces = try faceList(c, t, s);
+    const m = t.mesh(c);
+    var seams: ?sel.Bits = null;
+    if (c.args.value("seams") != null) {
+        const ss = try evaluateArg(c, t, "seams", .edge, true);
+        seams = try sel.toEdges(c.arena, m, ss.s.domain, &ss.bits);
+    }
+    const keep: ?[]const [2]f32 = if (m.attribute(Mesh.uv_name)) |a|
+        (if (a.domain == .corner and a.data == .float2) a.data.float2.slice() else null)
+    else
+        null;
+    const gpa = c.doc().gpa;
+    const stop: ?geom.editmesh.Stop = if (c.server.pool.deadline) |d| .{ .deadline = d, .io = c.server.io } else null;
+    const r = geom.uv.unwrap(gpa, m, faces, t.world, if (seams) |*b| b else null, keep, stop, .{
+        .method = std.meta.stringToEnum(geom.uv.Method, c.args.str("method").?).?,
+        .angle_limit = v.degToRad(@floatCast(c.args.float("angle_limit").?)),
+        .margin = @floatCast(c.args.float("margin").?),
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DeadlineExceeded => return error.ToolFailed, // reported by the command core
+    };
+    const shared = core.Shared([2]f32).fromOwned(gpa, r.uvs) catch |e| {
+        gpa.free(r.uvs);
+        return e;
+    };
+    const data: core.types.AttrData = .{ .float2 = shared };
+    m.setAttribute(gpa, Mesh.uv_name, .corner, data) catch {
+        return c.fail(.invalid_operation, "'{s}' already has the most attributes a mesh can hold", .{m.name.slice()});
+    };
+    if (r.closed > 0) try c.warn("{d} chart(s) closed on themselves with no seam and were split by angle instead; add seams for control", .{r.closed});
+    try noteShared(c, t);
+    try c.markChanged(t.mh, m.name.slice());
+    try writeResult(c, .face, faces);
+    try c.field("charts");
+    try c.out.write(r.charts);
+    try c.say("Unwrapped {d} {s} of '{s}' into {d} chart(s) in UVMap.", .{ faces.len, noun(.face, faces.len), t.name(c), r.charts });
 }
 
 fn merge(c: *Call) HandlerError!void {

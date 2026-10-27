@@ -111,6 +111,41 @@ const ops_cases = [_]OpsCase{
     \\ {"tool":"mesh.inset","arguments":{"object":"Torus","selector":{"where":"z > 0.4"},"thickness":0.02}},
     \\ {"tool":"mesh.extrude","arguments":{"object":"Torus","selector":{"where":"z > 0.4"},"distance":0.1}}]
     },
+    .{ .name = "loop_cut_cube_ring", .object = "Cube", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube"}},
+    \\ {"tool":"mesh.loop_cut","arguments":{"object":"Cube","selector":{"domain":"edge","direction":[0,0,1],"within":5}}}]
+    },
+    .{ .name = "loop_cut_grid_crossing", .object = "Grid", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"grid","grid_subdivisions":3}},
+    \\ {"tool":"mesh.loop_cut","arguments":{"object":"Grid","cuts":2,"selector":{"domain":"edge","union":[
+    \\  {"direction":[1,0,0],"within":1,"where":["y < -0.99","x < -0.3"]},{"direction":[0,1,0],"within":1,"where":["x < -0.99","y < -0.3"]}]}}}]
+    },
+    .{ .name = "loop_cut_cylinder_sides", .object = "Cylinder", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cylinder","segments":8}},
+    \\ {"tool":"mesh.loop_cut","arguments":{"object":"Cylinder","selector":{"domain":"edge","direction":[0,0,1],"within":1},"cuts":3}},
+    \\ {"tool":"mesh.transform_elements","arguments":{"object":"Cylinder","selector":{"domain":"vert","where":"abs(z) < 0.1"},"scale":[1.3,1.3,1]}}]
+    },
+    .{ .name = "bevel_cube_rounded", .object = "Cube", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube","scale":[2,1,0.5]}},
+    \\ {"tool":"mesh.bevel","arguments":{"object":"Cube","selector":{},"width":0.2,"segments":4}}]
+    },
+    .{ .name = "bevel_box_vertical_chamfer", .object = "Cube", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube"}},
+    \\ {"tool":"mesh.bevel","arguments":{"object":"Cube","selector":{"domain":"edge","direction":[0,0,1],"within":5},"width":0.3}}]
+    },
+    .{ .name = "bevel_cylinder_rim", .object = "Cylinder", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cylinder","segments":16}},
+    \\ {"tool":"mesh.bevel","arguments":{"object":"Cylinder","selector":{"domain":"edge","where":"z > 0.99"},"width":0.15,"segments":3}}]
+    },
+    .{ .name = "uv_unwrap_smart_torus", .object = "Torus", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"torus"}},
+    \\ {"tool":"mesh.uv_unwrap","arguments":{"object":"Torus"}}]
+    },
+    .{ .name = "uv_unwrap_conformal_cylinder", .object = "Cylinder", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cylinder","scale":[1,1,2]}},
+    \\ {"tool":"mesh.uv_unwrap","arguments":{"object":"Cylinder","method":"conformal",
+    \\  "seams":{"domain":"edge","union":[{"direction":[1,0,0],"within":89},{"direction":[0,0,1],"within":1,"where":["x > 0.99"]}]}}}]
+    },
 };
 
 const RenderCase = struct {

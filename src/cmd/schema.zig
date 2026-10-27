@@ -6,6 +6,7 @@
 //! recorded in the command log (FR-CLI-1).
 
 const std = @import("std");
+const registry = @import("engine").core.registry;
 const Stringify = std.json.Stringify;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -99,9 +100,7 @@ pub fn writeInputSchema(params: []const Param, w: *Stringify) Stringify.Error!vo
 }
 
 fn writeNumber(w: *Stringify, x: f64) Stringify.Error!void {
-    try w.beginWriteRaw();
-    try w.writer.print("{d}", .{x});
-    w.endWriteRaw();
+    try registry.writeBound(w, x);
 }
 
 fn writeParamSchema(p: Param, w: *Stringify) Stringify.Error!void {
@@ -253,15 +252,19 @@ fn writeParamSchema(p: Param, w: *Stringify) Stringify.Error!void {
         try w.objectField("x-mcp-header");
         try w.write(h);
     }
-    try w.objectField("description");
-    var buf: [1024]u8 = undefined;
     const unit: Unit = switch (p.type) {
         .number => |n| n.unit,
         .vec3 => |n| n.unit,
         else => .none,
     };
-    const desc = std.fmt.bufPrint(&buf, "{s}{s}", .{ p.doc, unit.suffix() }) catch p.doc;
-    try w.write(desc);
+    // An empty doc means the name says it all (scene_id); tools/list is
+    // read on every connect, so each byte repeated per tool counts.
+    if (p.doc.len > 0 or unit != .none) {
+        try w.objectField("description");
+        var buf: [1024]u8 = undefined;
+        const desc = std.fmt.bufPrint(&buf, "{s}{s}", .{ p.doc, unit.suffix() }) catch p.doc;
+        try w.write(desc);
+    }
     try w.endObject();
 }
 

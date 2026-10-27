@@ -89,8 +89,8 @@ jobs:
           npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/validator" gltf-validator@2.0.0-dev.3.10
           node scripts/validate-gltf.mjs "$RUNNER_TEMP/validator/node_modules" dining.glb dining.gltf
 
-  # TRD §15: line coverage of src/core, src/geom and src/io. Reported per
-  # directory in the job summary; add `--min 85` to make it a merge gate.
+  # TRD §15: line coverage of src/core, src/geom and src/io, reported per
+  # directory in the job summary; the job fails below 85% in any of them.
   # ubuntu-26.04 because Ubuntu 24.04 does not package kcov.
   coverage:
     runs-on: ubuntu-26.04
@@ -103,7 +103,7 @@ jobs:
         with:
           node-version: 22
       - run: sudo apt-get update && sudo apt-get install -y kcov
-      - run: node scripts/coverage.mjs
+      - run: node scripts/coverage.mjs --min 85
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ github.sha }}

@@ -43,6 +43,7 @@ pub fn triangulate(em: *EditMesh, gpa: Allocator, faces: []const u32, p: Params)
     defer tris.deinit(gpa);
 
     for (faces) |f| {
+        try em.tick();
         const face = em.faces.items[f];
         if (face.len == 3) {
             try out.selected.append(gpa, f);
@@ -65,7 +66,7 @@ pub fn triangulate(em: *EditMesh, gpa: Allocator, faces: []const u32, p: Params)
             const two = quadSplit(pos.items, normal, p.quad);
             try tris.appendSlice(gpa, &two);
         } else {
-            try polygon(gpa, pos.items, normal, p.ngon, &tris);
+            try polygon(em, gpa, pos.items, normal, p.ngon, &tris);
         }
         em.removeFace(f);
         for (tris.items) |t| {
@@ -101,7 +102,7 @@ fn quadSplit(p: []const Vec3, n: Vec3, method: QuadMethod) [2]Tri {
     };
 }
 
-fn polygon(gpa: Allocator, p: []const Vec3, n: Vec3, method: NgonMethod, tris: *std.ArrayList(Tri)) Error!void {
+fn polygon(em: *EditMesh, gpa: Allocator, p: []const Vec3, n: Vec3, method: NgonMethod, tris: *std.ArrayList(Tri)) Error!void {
     const corners = try gpa.alloc(u32, p.len);
     defer gpa.free(corners);
     for (corners, 0..) |*c, i| c.* = @intCast(i);
@@ -110,14 +111,14 @@ fn polygon(gpa: Allocator, p: []const Vec3, n: Vec3, method: NgonMethod, tris: *
     try math.triangulate.triangulate(gpa, p, corners, &flat);
     var i: usize = 0;
     while (i + 2 < flat.items.len) : (i += 3) try tris.append(gpa, .{ flat.items[i], flat.items[i + 1], flat.items[i + 2] });
-    if (method == .beauty) try beautify(gpa, p, n, tris.items);
+    if (method == .beauty) try beautify(em, gpa, p, n, tris.items);
 }
 
 /// Lawson flips: for each interior edge shared by two triangles, flip it
 /// when that raises the pair's summed quality and keeps both triangles
 /// facing the polygon's way. Every flip raises the total, so the loop ends;
 /// the budget only bounds pathological input.
-fn beautify(gpa: Allocator, p: []const Vec3, n: Vec3, tris: []Tri) Allocator.Error!void {
+fn beautify(em: *EditMesh, gpa: Allocator, p: []const Vec3, n: Vec3, tris: []Tri) Error!void {
     const Key = u64;
     const key = struct {
         fn of(a: u32, b: u32) Key {
@@ -142,6 +143,7 @@ fn beautify(gpa: Allocator, p: []const Vec3, n: Vec3, tris: []Tri) Allocator.Err
     };
     var budget = 8 * tris.len * tris.len + 64;
     while (stack.pop()) |kk| {
+        try em.tick();
         if (budget == 0) break;
         budget -= 1;
         const pair = adj.get(kk) orelse continue;

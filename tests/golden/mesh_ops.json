@@ -362,5 +362,213 @@
    1291.9999997392297,
    1368.0000029206276
   ]
+ },
+ "loop_cut_cube_ring": {
+  "points": 12,
+  "edges": 20,
+  "faces": 10,
+  "corners": 40,
+  "smooth_faces": 0,
+  "topology": "77a879fcc2035dd0",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 24,
+  "volume": 7.9999999999999964,
+  "uv_sum": [
+   20,
+   21
+  ]
+ },
+ "loop_cut_grid_crossing": {
+  "points": 36,
+  "edges": 60,
+  "faces": 25,
+  "corners": 100,
+  "smooth_faces": 0,
+  "topology": "5b7653f4e23d62dd",
+  "bounds": [
+   [
+    -1,
+    -1,
+    0
+   ],
+   [
+    1,
+    1,
+    0
+   ]
+  ],
+  "area": 4,
+  "volume": 0,
+  "uv_sum": [
+   36.66666740179062,
+   36.66666641831398
+  ]
+ },
+ "loop_cut_cylinder_sides": {
+  "points": 40,
+  "edges": 72,
+  "faces": 34,
+  "corners": 144,
+  "smooth_faces": 0,
+  "topology": "9c3add7c89e0e9a8",
+  "bounds": [
+   [
+    -1.2999999523162842,
+    -1.2999999523162842,
+    -1
+   ],
+   [
+    1.2999998331069946,
+    1.2999999523162842,
+    1
+   ]
+  ],
+  "area": 19.830636940269642,
+  "volume": 6.5902348633901715,
+  "uv_sum": [
+   72.00000016391277,
+   44
+  ]
+ },
+ "bevel_cube_rounded": {
+  "points": 200,
+  "edges": 444,
+  "faces": 246,
+  "corners": 888,
+  "smooth_faces": 0,
+  "topology": "79ccd217d8612a2f",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 21.885721253509317,
+  "volume": 7.749920583007476,
+  "uv_sum": [
+   486.0000007599592,
+   537.000001847744
+  ]
+ },
+ "bevel_box_vertical_chamfer": {
+  "points": 16,
+  "edges": 24,
+  "faces": 10,
+  "corners": 48,
+  "smooth_faces": 0,
+  "topology": "8489c1b669930bad",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 22.23411246522025,
+  "volume": 7.639999971389769,
+  "uv_sum": [
+   24.00000086426735,
+   26.00000110268593
+  ]
+ },
+ "bevel_cylinder_rim": {
+  "points": 80,
+  "edges": 144,
+  "faces": 66,
+  "corners": 288,
+  "smooth_faces": 0,
+  "topology": "3165a78812d1db4f",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 18.1775911869344,
+  "volume": 6.089129134505657,
+  "uv_sum": [
+   168.00000074505806,
+   155.19999742507935
+  ]
+ },
+ "uv_unwrap_smart_torus": {
+  "points": 576,
+  "edges": 1152,
+  "faces": 576,
+  "corners": 2304,
+  "smooth_faces": 0,
+  "topology": "07191c04831a912a",
+  "bounds": [
+   [
+    -1.25,
+    -1.25,
+    -0.25
+   ],
+   [
+    1.25,
+    1.25,
+    0.25
+   ]
+  ],
+  "area": 9.739848180836017,
+  "volume": 1.1747357184760148,
+  "uv_sum": [
+   1136.7815843857825,
+   894.5106289107352
+  ]
+ },
+ "uv_unwrap_conformal_cylinder": {
+  "points": 64,
+  "edges": 96,
+  "faces": 34,
+  "corners": 192,
+  "smooth_faces": 0,
+  "topology": "ebddf940b177cfb8",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 18.789084198055278,
+  "volume": 6.242890270276595,
+  "uv_sum": [
+   85.28513047471642,
+   93.0519931986928
+  ]
  }
 }

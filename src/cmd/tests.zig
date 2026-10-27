@@ -316,6 +316,21 @@ test "tool calls become spans that continue the caller's trace" {
     try testing.expect(saw_scene);
 }
 
+test "the wall-time budget stops a mesh operator part-way" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"grid\",\"name\":\"G\",\"grid_subdivisions\":64}}", .{id}));
+    f.server.config.budgets.max_wall_ms = 0;
+    const stopped = try f.call("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"selector\":{{}},\"distance\":0.1,\"mode\":\"individual\"}}", .{id}));
+    try testing.expectEqual(server_mod.ErrorCode.budget_exceeded, stopped.tool_error.code);
+    f.server.config.budgets.max_wall_ms = 60_000;
+    const after = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 64 * 64), after.object.get("count").?.integer);
+    try testing.expectEqual(@as(i64, 1), (try f.ok("scene.inspect", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}))).object.get("scene_rev").?.integer);
+}
+
 fn countsOf(v: Value) [4]i64 {
     const c = v.object.get("counts").?.object;
     return .{ c.get("verts").?.integer, c.get("edges").?.integer, c.get("faces").?.integer, c.get("triangles").?.integer };
@@ -392,6 +407,76 @@ test "mesh tools: select, extrude, inset, triangulate, merge, transform" {
     for (0..5) |_| _ = try f.ok("scene.undo", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
     const back = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\"}}", .{id}));
     try testing.expectEqual([4]i64{ 16, 28, 14, 28 }, countsOf(back));
+}
+
+test "mesh.loop_cut cuts rings and explains empty ones" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\"}}", .{id}));
+    // All four vertical edges lie on one ring: one loop around the middle.
+    const cut = try f.ok("mesh.loop_cut", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"edge\",\"direction\":[0,0,1],\"within\":5}}}}", .{id}));
+    try testing.expectEqual([4]i64{ 12, 20, 10, 20 }, countsOf(cut));
+    var loop_json: std.Io.Writer.Allocating = .init(f.arena_state.allocator());
+    try std.json.Stringify.value(cut.object.get("result").?, .{}, &loop_json.writer);
+    const loop = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{s}}}", .{ id, loop_json.written() }));
+    try testing.expectEqual(@as(i64, 4), loop.object.get("count").?.integer);
+    try testing.expectEqual(@as(f64, 0), schemaNumber(loop.object.get("bounds").?.object.get("max").?.array.items[2]));
+
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cone\",\"name\":\"Cone\"}}", .{id}));
+    const no_quads = try f.call("mesh.loop_cut", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Cone\",\"selector\":{{}}}}", .{id}));
+    try testing.expectEqualStrings("/selector", no_quads.tool_error.path);
+    const faces_dir = try f.call("mesh.loop_cut", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"face\",\"direction\":[0,0,1]}}}}", .{id}));
+    try testing.expectEqualStrings("/selector/direction", faces_dir.tool_error.path);
+}
+
+test "OBJ, STL and PLY round trips through io.export and io.import" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const a = try f.createScene();
+    _ = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Red\",\"properties\":{{\"base_color\":[1,0,0,1],\"roughness\":0.25}}}}", .{a}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\",\"material\":\"Red\",\"location\":[0,0,1]}}", .{a}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cylinder\",\"name\":\"Can\",\"segments\":8,\"location\":[3,0,1]}}", .{a}));
+    _ = try f.ok("camera.add", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{a}));
+
+    const obj = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.obj\"}}", .{a}));
+    try testing.expectEqual(@as(i64, 2), obj.object.get("objects").?.integer);
+    try testing.expect(obj.object.get("mtl_path") != null);
+    // The camera is reported, not written.
+    try testing.expectEqual(@as(usize, 1), obj.object.get("dropped").?.array.items.len);
+    const again = try f.call("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.obj\"}}", .{a}));
+    try testing.expectEqual(server_mod.ErrorCode.io_error, again.tool_error.code);
+    _ = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.stl\"}}", .{a}));
+    _ = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.ply\"}}", .{a}));
+
+    const b = try f.createScene();
+    const back = try f.ok("io.import", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.obj\"}}", .{b}));
+    const objs = back.object.get("objects").?.array.items;
+    try testing.expectEqual(@as(usize, 2), objs.len);
+    try testing.expectEqualStrings("Box", objs[0].object.get("name").?.string);
+    try testing.expectEqual(@as(i64, 6), objs[0].object.get("faces").?.integer);
+    try testing.expectEqual(@as(i64, 10), objs[1].object.get("faces").?.integer);
+    // World positions come back exactly, through Y-up and back.
+    const box = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\"}}", .{b}));
+    try testing.expectEqual(@as(f64, 2), schemaNumber(box.object.get("bounds").?.object.get("max").?.array.items[2]));
+    try testing.expectEqualStrings("Red", objs[0].object.get("materials").?.array.items[0].string);
+
+    const stl = try f.ok("io.import", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.stl\",\"scale\":0.5}}", .{b}));
+    const st = stl.object.get("objects").?.array.items[0].object;
+    // 12 + 28 triangles, welded back to 8 + 16 vertices.
+    try testing.expectEqual(@as(i64, 40), st.get("faces").?.integer);
+    const welded = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"{s}\",\"selector\":{{\"domain\":\"vert\"}}}}", .{ b, st.get("name").?.string }));
+    try testing.expectEqual(@as(i64, 24), welded.object.get("total").?.integer);
+    try testing.expectEqual(@as(f64, 1), schemaNumber(welded.object.get("bounds").?.object.get("max").?.array.items[2]));
+    const ply = try f.ok("io.import", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.ply\"}}", .{b}));
+    try testing.expectEqual(@as(i64, 16), ply.object.get("objects").?.array.items[0].object.get("faces").?.integer);
+
+    const missing = try f.call("io.import", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"nope.obj\"}}", .{b}));
+    try testing.expectEqual(server_mod.ErrorCode.not_found, missing.tool_error.code);
+    const unknown = try f.call("io.import", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"scene.mtl\"}}", .{b}));
+    try testing.expectEqualStrings("/path", unknown.tool_error.path);
 }
 
 fn schemaNumber(v: Value) f64 {

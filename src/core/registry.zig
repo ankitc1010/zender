@@ -111,6 +111,25 @@ pub fn writeF64(w: *Stringify, v: f64) !void {
     w.endWriteRaw();
 }
 
+/// Writes a schema bound or default; whole numbers with four or more
+/// trailing zeros (1e9) in exponent form, which is valid JSON and keeps
+/// tools/list short.
+pub fn writeBound(w: *Stringify, x: f64) Stringify.Error!void {
+    if (!std.math.isFinite(x)) return w.write(null);
+    try w.beginWriteRaw();
+    var m = @abs(x);
+    var exp: u32 = 0;
+    if (m >= 1e4 and m < 1e18 and @floor(m) == m) {
+        while (@mod(m, 10) == 0) : (exp += 1) m /= 10;
+    }
+    if (exp >= 4) {
+        try w.writer.print("{s}{d}e{d}", .{ if (x < 0) "-" else "", m, exp });
+    } else {
+        try w.writer.print("{d}", .{x});
+    }
+    w.endWriteRaw();
+}
+
 fn writeAgentFloat(w: *Stringify, unit: Unit, v: f32) !void {
     if (unit == .angle) return writeF64(w, toAgent(unit, v));
     return writeF32(w, v);
@@ -342,11 +361,11 @@ fn writePropSchema(comptime T: type, comptime p: Prop, w: *Stringify, with_defau
             try w.write("number");
             if (p.min) |lo| {
                 try w.objectField("minimum");
-                try writeF64(w, lo);
+                try writeBound(w, lo);
             }
             if (p.max) |hi| {
                 try w.objectField("maximum");
-                try writeF64(w, hi);
+                try writeBound(w, hi);
             }
             try w.endObject();
             try w.objectField("minItems");
@@ -358,11 +377,11 @@ fn writePropSchema(comptime T: type, comptime p: Prop, w: *Stringify, with_defau
     if (p.kind == .float or p.kind == .int) {
         if (p.min) |lo| {
             try w.objectField("minimum");
-            try writeF64(w, lo);
+            try writeBound(w, lo);
         }
         if (p.max) |hi| {
             try w.objectField("maximum");
-            try writeF64(w, hi);
+            try writeBound(w, hi);
         }
     }
     if (with_default) {
@@ -461,4 +480,14 @@ test "set converts degrees and validates" {
     try testing.expectEqualStrings(
         \\{"size":2,"angle":90,"count":8,"mode":"exact","color":[0.8,0.8,0.8,1]}
     , out.written());
+}
+
+test "schema bounds use exponent form for round numbers" {
+    var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer buf.deinit();
+    var w: Stringify = .{ .writer = &buf.writer };
+    try w.beginArray();
+    for ([_]f64{ 1e9, -1e6, 1e12, 4096, 4294967295, 0.25, 1e-6, 12000 }) |x| try writeBound(&w, x);
+    try w.endArray();
+    try std.testing.expectEqualStrings("[1e9,-1e6,1e12,4096,4294967295,0.25,0.000001,12000]", buf.written());
 }

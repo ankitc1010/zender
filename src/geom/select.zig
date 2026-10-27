@@ -102,6 +102,8 @@ pub const Node = struct {
     sphere: ?struct { center: Vec3, radius: f32 } = null,
     /// Unit normal within an angle of `dir`: dot(n, dir) >= cos_max.
     normal: ?struct { dir: Vec3, cos_max: f32 } = null,
+    /// Edges only: running along `dir` either way, |dot(d, dir)| >= cos_max.
+    direction: ?struct { dir: Vec3, cos_max: f32 } = null,
     /// Set operations on child nodes; every part present must hold.
     any_of: []const Node = &.{},
     all_of: []const Node = &.{},
@@ -265,6 +267,18 @@ const Ctx = struct {
             while (it.next()) |i| {
                 const x = nrm[i];
                 if (v.dot(x, x) < 0.5 or v.dot(x, dir) < cone.cos_max) out.unset(i);
+            }
+        }
+        if (n.direction) |cone| {
+            if (c.domain != .edge) return error.FieldNotInDomain;
+            const p = c.pos();
+            const edges = c.m.edges.slice();
+            const dir = v.normalize(cone.dir);
+            var it = out.iterator(.{});
+            while (it.next()) |i| {
+                const d = v.sub(p[edges[i][1]], p[edges[i][0]]);
+                const len = v.length(d);
+                if (len == 0 or @abs(v.dot(d, dir)) < cone.cos_max * len) out.unset(i);
             }
         }
         if (n.any_of.len > 0) {
@@ -515,6 +529,17 @@ test "normal cones, comparisons and set operations on a cube" {
     var bottom = try evaluate(gpa, &m, .{ .domain = .face, .space = .local, .root = .{ .normal = .{ .dir = .{ 0, 0, -1 }, .cos_max = 0.99 } } }, v.identity, &diag);
     defer bottom.deinit(gpa);
     try testing.expect(mirrored.eql(bottom));
+
+    // Edge direction is undirected: the cube's 4 vertical edges, and under a
+    // 90° turn about X the 4 edges along local Y.
+    var vertical = try evaluate(gpa, &m, .{ .domain = .edge, .root = .{ .direction = .{ .dir = .{ 0, 0, -1 }, .cos_max = 0.99 } } }, v.identity, &diag);
+    defer vertical.deinit(gpa);
+    try testing.expectEqual(@as(usize, 4), countSel(vertical));
+    var along_y = try evaluate(gpa, &m, .{ .domain = .edge, .space = .local, .root = .{ .direction = .{ .dir = .{ 0, 1, 0 }, .cos_max = 0.99 } } }, v.identity, &diag);
+    defer along_y.deinit(gpa);
+    var turned_v = try evaluate(gpa, &m, .{ .domain = .edge, .root = .{ .direction = .{ .dir = .{ 0, 0, 1 }, .cos_max = 0.99 } } }, world, &diag);
+    defer turned_v.deinit(gpa);
+    try testing.expect(turned_v.eql(along_y));
 }
 
 test "index ranges, attributes and domain conversion" {

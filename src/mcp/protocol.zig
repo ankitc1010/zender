@@ -709,16 +709,29 @@ fn writeTools(w: *Stringify, tools: []const cmd.server.Tool) Stringify.Error!voi
         try w.write(t.description);
         try w.objectField("inputSchema");
         try cmd.schema.writeInputSchema(t.params, w);
+        // Hints equal to the MCP defaults (readOnly false, destructive true,
+        // idempotent false, openWorld true) are left out; destructive and
+        // idempotent mean nothing for read-only tools.
         try w.objectField("annotations");
         try w.beginObject();
-        try w.objectField("readOnlyHint");
-        try w.write(t.kind == .read_only or t.kind == .global);
-        try w.objectField("destructiveHint");
-        try w.write(t.destructive);
-        try w.objectField("idempotentHint");
-        try w.write(t.idempotent);
-        try w.objectField("openWorldHint");
-        try w.write(t.open_world);
+        const read_only = t.kind == .read_only or t.kind == .global;
+        if (read_only) {
+            try w.objectField("readOnlyHint");
+            try w.write(true);
+        } else {
+            if (!t.destructive) {
+                try w.objectField("destructiveHint");
+                try w.write(false);
+            }
+            if (t.idempotent) {
+                try w.objectField("idempotentHint");
+                try w.write(true);
+            }
+        }
+        if (!t.open_world) {
+            try w.objectField("openWorldHint");
+            try w.write(false);
+        }
         try w.endObject();
         try w.endObject();
     }

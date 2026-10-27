@@ -11,6 +11,8 @@
 //!   box       {"min": [x, y, z], "max": [x, y, z]}: centre inside
 //!   sphere    {"center": [x, y, z], "radius": r}
 //!   normal    [x, y, z] with "within": degrees (default 30)
+//!   direction [x, y, z]: edges running along it, either way, with the
+//!             same "within" (edge domain only)
 //!   union     [selector, ...]: any of them
 //!   intersect [selector, ...]: all of them
 //!   subtract  selector or [selector, ...]: none of them
@@ -30,17 +32,18 @@ const Node = sel.Node;
 const Domain = sel.Domain;
 
 /// The grammar in one paragraph, for tool descriptions.
-pub const summary = "Selector: one JSON object whose keys must all hold. domain face|edge|vert, space world (default)|local; index [3,[10,20]] (inclusive ranges); where \"z > 0.5\" or a list (x y z centre, nx ny nz normal, area, length, index, or a scalar attribute such as material_index; abs(...) allowed; < <= > >= == !=); box {min,max} (centre inside); sphere {center,radius}; normal [x,y,z] with within (deg, default 30); union / intersect [selectors]; subtract selector or list. {} selects all. Face centre = mean of corners.";
+pub const summary = "Selector: one JSON object whose keys must all hold. domain face|edge|vert, space world (default)|local; index [3,[10,20]] (inclusive ranges); where \"z > 0.5\" or a list (x y z centre, nx ny nz normal, area, length, index, or a scalar attribute such as material_index; abs(...) allowed; < <= > >= == !=); box {min,max} (centre inside); sphere {center,radius}; normal [x,y,z] with within (deg, default 30); direction [x,y,z] (edges along it either way, same within); union / intersect [selectors]; subtract selector or list. {} selects all. Face centre = mean of corners.";
 
 const max_depth = 16;
 const max_nodes = 256;
 
-const node_keys = [_][]const u8{ "index", "where", "box", "sphere", "normal", "within", "union", "intersect", "subtract" };
-const top_keys = [_][]const u8{ "domain", "space", "index", "where", "box", "sphere", "normal", "within", "union", "intersect", "subtract" };
+const node_keys = [_][]const u8{ "index", "where", "box", "sphere", "normal", "direction", "within", "union", "intersect", "subtract" };
+const top_keys = [_][]const u8{ "domain", "space", "index", "where", "box", "sphere", "normal", "direction", "within", "union", "intersect", "subtract" };
 
 const Parser = struct {
     arena: Allocator,
     failure: *schema.Failure,
+    domain: Domain,
     nodes: usize = 0,
 
     fn fail(p: *Parser, path: []const u8, hint: []const u8, comptime fmt: []const u8, args: anytype) Allocator.Error!?Node {
@@ -109,17 +112,26 @@ const Parser = struct {
             if (!(r >= 0) or !std.math.isFinite(r)) return p.fail(try p.sub(spath, "/radius", .{}), "", "sphere radius must be zero or more", .{});
             n.sphere = .{ .center = ctr, .radius = @floatCast(r) };
         }
+        var within: f64 = 30;
+        if (obj.get("within")) |w| {
+            within = schema.number(w) orelse return p.fail(try p.sub(path, "/within", .{}), "", "within must be a number of degrees", .{});
+            if (!(within >= 0 and within <= 180)) return p.fail(try p.sub(path, "/within", .{}), "", "within must be between 0 and 180 degrees", .{});
+            if (obj.get("normal") == null and obj.get("direction") == null) {
+                return p.fail(try p.sub(path, "/within", .{}), "within is the angle allowed around normal or direction; add \"normal\":[x,y,z]", "within needs normal or direction", .{});
+            }
+        }
+        const cos_max: f32 = @floatCast(@cos(within * std.math.pi / 180.0) - 1e-6);
         if (obj.get("normal")) |x| {
             const dir = (try p.vec3(x, try p.sub(path, "/normal", .{}))) orelse return null;
             if (@abs(dir[0]) + @abs(dir[1]) + @abs(dir[2]) == 0) return p.fail(try p.sub(path, "/normal", .{}), "for example [0,0,1] for faces facing up", "normal must not be zero", .{});
-            var within: f64 = 30;
-            if (obj.get("within")) |w| {
-                within = schema.number(w) orelse return p.fail(try p.sub(path, "/within", .{}), "", "within must be a number of degrees", .{});
-                if (!(within >= 0 and within <= 180)) return p.fail(try p.sub(path, "/within", .{}), "", "within must be between 0 and 180 degrees", .{});
-            }
-            n.normal = .{ .dir = dir, .cos_max = @floatCast(@cos(within * std.math.pi / 180.0) - 1e-6) };
-        } else if (obj.get("within") != null) {
-            return p.fail(try p.sub(path, "/within", .{}), "within is the angle allowed around normal; add \"normal\":[x,y,z]", "within needs normal", .{});
+            n.normal = .{ .dir = dir, .cos_max = cos_max };
+        }
+        if (obj.get("direction")) |x| {
+            const dpath = try p.sub(path, "/direction", .{});
+            if (p.domain != .edge) return p.fail(dpath, "set \"domain\":\"edge\"; for faces or verts use normal", "direction applies to edges only", .{});
+            const dir = (try p.vec3(x, dpath)) orelse return null;
+            if (@abs(dir[0]) + @abs(dir[1]) + @abs(dir[2]) == 0) return p.fail(dpath, "for example [0,0,1] for vertical edges", "direction must not be zero", .{});
+            n.direction = .{ .dir = dir, .cos_max = cos_max };
         }
         inline for (.{ .{ "union", "any_of" }, .{ "intersect", "all_of" }, .{ "subtract", "none_of" } }) |pair| {
             if (obj.get(pair[0])) |x| {
@@ -263,7 +275,7 @@ pub fn parseDomain(s: []const u8) ?Domain {
 /// Parses a selector argument at JSON pointer `path`. A missing selector
 /// selects everything in `default_domain`. Null on failure, with `failure` set.
 pub fn parse(arena: Allocator, val: ?Value, default_domain: Domain, path: []const u8, failure: *schema.Failure) Allocator.Error!?Selector {
-    var p: Parser = .{ .arena = arena, .failure = failure };
+    var p: Parser = .{ .arena = arena, .failure = failure, .domain = default_domain };
     var out: Selector = .{ .domain = default_domain };
     const x = val orelse return out;
     if (x == .null) return out;
@@ -283,6 +295,7 @@ pub fn parse(arena: Allocator, val: ?Value, default_domain: Domain, path: []cons
             return null;
         };
     }
+    p.domain = out.domain;
     out.root = (try p.node(x, path, 0, true)) orelse return null;
     return out;
 }
@@ -353,6 +366,11 @@ test "selector grammar parses and reports precise paths" {
     try testing.expect(try parseText(arena, "{\"within\":10}", &failure) == null);
     try testing.expect(try parseText(arena, "{\"normals\":[0,0,1]}", &failure) == null);
     try testing.expect(failure.valid_values.len > 0);
+
+    const d = (try parseText(arena, "{\"domain\":\"edge\",\"direction\":[0,0,2],\"within\":5}", &failure)).?;
+    try testing.expectApproxEqAbs(@as(f32, @cos(5 * std.math.pi / 180.0)), d.root.direction.?.cos_max, 1e-5);
+    try testing.expect(try parseText(arena, "{\"direction\":[0,0,1]}", &failure) == null);
+    try testing.expectEqualStrings("/selector/direction", failure.path);
 }
 
 test "index output compresses runs" {
