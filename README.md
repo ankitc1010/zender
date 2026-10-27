@@ -8,7 +8,7 @@ Zender borrows Blender's concepts (datablocks, an RNA-style property registry, B
 
 ## Build
 
-Requires Zig 0.16.0. The first build fetches [Manifold](https://github.com/elalish/manifold) v3.5.4 (pinned by hash in `build.zig.zon`) and compiles it with `zig c++`; `-Dboolean=none` builds without it and without `mesh.boolean`, as wasm32 always does. Release builds use a fast allocator; `-Ddebug-allocator` switches back to Zig's leak-checking one.
+Requires Zig 0.16.0. The first build fetches [Manifold](https://github.com/elalish/manifold) v3.5.4 (pinned by hash in `build.zig.zon`) and compiles it with `zig c++`; `-Dboolean=none` builds without it and without `mesh.boolean`, as wasm32 always does. Release builds use Zig's fast `smp_allocator`; `-Ddebug-allocator` switches back to its leak-checking one.
 
 ```sh
 zig build            # zig-out/bin/zender (ReleaseSafe)

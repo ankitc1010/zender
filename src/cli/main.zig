@@ -92,12 +92,14 @@ fn fail(comptime fmt: []const u8, args: anytype) Exit {
 
 /// The allocator scenes and tool calls use. For ReleaseSafe without libc,
 /// std hands main its DebugAllocator, which makes every allocation slow;
-/// release builds use the fast general-purpose allocator instead. Debug
-/// builds and -Ddebug-allocator keep the DebugAllocator's leak and
-/// double-free checks (the tests always use std.testing.allocator).
+/// release builds use Zig's fast general-purpose allocator instead, also
+/// when libc is linked: glibc's malloc keeps freed large blocks, which put
+/// a 1 M-triangle scene at 2.9x its mesh bytes (NFR-5 allows 2.5x), while
+/// smp_allocator returns them. Debug builds and -Ddebug-allocator keep the
+/// DebugAllocator's leak and double-free checks (the tests always use
+/// std.testing.allocator).
 fn generalAllocator(init: std.process.Init) Allocator {
     if (builtin.mode == .Debug or build_options.debug_allocator) return init.gpa;
-    if (builtin.link_libc) return std.heap.c_allocator;
     return std.heap.smp_allocator;
 }
 
