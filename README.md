@@ -4,7 +4,7 @@ A headless 3D scene engine in Zig that LLM agents drive through the Model Contex
 
 Zender borrows Blender's concepts (datablocks, an RNA-style property registry, Blender's primitives and defaults) but is an independent implementation, not a fork. The design is in the [technical requirements document](https://claude.ai/artifact/6DEysg565wv9dJ7wv7XRQi).
 
-**Status: P0 (Foundations), version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, group them in collections, look at them with a preview renderer, and export glTF 2.0 or a canonical `scene.json`. Mesh editing, modifiers and `.blend` I/O come in P1 and P2 (see [Roadmap](#roadmap)).
+**Status: P0 (Foundations) done, P1 (Modeling) under way; version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, group them in collections, edit meshes element by element (select, extrude, inset, triangulate, merge, transform), look at them with a preview renderer, and export glTF 2.0 or a canonical `scene.json`. Loop cut, bevel, UV unwrap, booleans, modifiers and `.blend` I/O come next (see [Roadmap](#roadmap)).
 
 ## Build
 
@@ -54,6 +54,7 @@ Observability: `serve` writes one JSON log line per tool call to stderr (`--log-
 | --- | --- |
 | Scene | `scene.create`, `scene.inspect`, `scene.validate`, `scene.undo`, `scene.redo`, `scene.apply`, `scene.close` |
 | Object | `object.add_primitive`, `object.duplicate`, `object.delete`, `object.transform`, `object.set_parent`, `object.set_properties` |
+| Mesh | `mesh.select_preview`, `mesh.transform_elements`, `mesh.extrude`, `mesh.inset`, `mesh.triangulate`, `mesh.merge` |
 | Collection | `collection.create`, `collection.update`, `collection.delete` |
 | Shading | `material.create`, `material.update`, `material.assign`, `world.set` |
 | Camera and light | `camera.add`, `camera.look_at`, `camera.frame_objects`, `light.add` |
@@ -64,6 +65,8 @@ Observability: `serve` writes one JSON log line per tool call to stderr (`--log-
 Conventions: right-handed, Z up, metres, angles in degrees at the tool boundary (radians inside), colours scene-linear Rec.709 in 0..1.
 
 Every call names its scene with the `scene_id` that `scene.create` returns. Mutating tools accept `if_rev` for optimistic concurrency and return `scene_rev`, `changed`, `created` and `warnings`. Errors return `isError` with `{code, message, path, hint, valid_values}`, so a model can correct itself. `scene.apply` runs up to 256 ops as one all-or-nothing transaction and one undo step. Destructive calls ask for confirmation through MRTR when the client supports elicitation; otherwise they need `confirm: true`.
+
+Mesh tools take a **selector** instead of a stored selection, since an agent cannot click. A selector is one JSON object whose keys must all hold: `domain` (face, edge or vert), `index` (indices and `[first, last]` ranges), `where` (`"z > 0.5"`, `"abs(x) < 0.1"`, `"material_index == 1"`), `box`, `sphere`, `normal` with `within` degrees, and `union` / `intersect` / `subtract` of nested selectors. Positions and normals are in world space unless `space` is `local`. Each tool returns a `result` selector for the elements it leaves selected (the extruded caps, the inset faces), so the next call can use it as is. Offsets and distances are world metres, as `scene.inspect` reports bounds. Every result is validated (FR-GEO-3); new winding conflicts or zero-area faces come back as warnings.
 
 `render.preview` returns the image inline (long edge ≤ 1024 px), a `zender://scene/{id}/render/{job}` link to the full-size PNG, and which objects are visible and how many pixels each covers.
 
@@ -77,22 +80,23 @@ Five layers; `build.zig` gives each module imports only from lower layers, so an
 | --- | --- | --- |
 | Front ends | `src/mcp`, `src/cli` | Wire formats only, no scene logic |
 | Command core | `src/cmd` | Dispatcher, schema validation, budgets, transactions, command log, tool handlers |
-| Engine | `src/core`, `src/geom`, `src/eval` | Database, property registry, undo, geometry, evaluation |
+| Engine | `src/core`, `src/geom`, `src/eval` | Database, property registry, undo, geometry (EditMesh, selectors, operators), evaluation |
 | Render and I/O | `src/render`, `src/io` | Preview rasteriser, PNG, glTF/GLB |
 | Interchange and platform | `src/ir`, `src/math` | Flat evaluated-scene snapshot; math and the thread pool |
 
 - **Data model:** datablocks live in generational pools addressed by `{type, index, generation}` handles, so a stale handle is detected, never dereferenced. Names follow Blender's rules (≤ 255 bytes, `.001` suffixes). Mesh data is structure-of-arrays with copy-on-write buffers, so snapshots for transactions and undo copy no vertex data.
 - **Property registry:** each datablock type declares its properties once. That table drives validation, unit conversion at the boundary, JSON Schema for the tools, `schema.describe`, and the `.blend` member names for P2.
 - **Determinism:** the same command log and seed give byte-identical glTF and PNG output, independent of thread count. All parallel work runs through one `parallelFor` on the shared `std.Io` pool. Chunks write disjoint outputs and merge in fixed order.
+- **EditMesh:** topology-changing operators work on a half-edge structure with disk cycles around vertices and radial cycles around edges, so n-gons, non-manifold edges, loose geometry and holes all work (FR-GEO-2). Conversion from and to the stored mesh is O(n), and a round trip without edits returns identical arrays. Attributes (UVs, flat shading, material indices, any generic layer) are copied or interpolated onto new elements.
 - **Evaluation cache:** evaluated normals are cached per scene, keyed by buffer serials that are never reused and change on every write.
 - **Collections:** a tree under the scene's master collection, one parent each. An object is hidden from render or preview only if every collection path to it hides it, as in Blender.
 - **scene.json (FR-DM-8):** a canonical dump for diffs and tests: datablocks sorted by name and linked by name, stored units (metres, radians), mesh arrays as XxHash64 digests or in full. Equal scenes give byte-identical files.
 
 ## Testing
 
-`zig build test` runs 64 tests: math, data model, collections, undo, scene.json, primitives, normals, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG encode and decode, glTF export, path confinement, budgets and tracing, the command core end to end, command-log replay, the MCP protocol, and two golden suites:
+`zig build test` runs 86 tests: math, data model, collections, undo, scene.json, primitives, normals, EditMesh, selectors, the mesh operators, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG encode and decode, glTF export, path confinement, budgets and tracing, the command core end to end, command-log replay, the MCP protocol, and two golden suites:
 
-- **Golden geometry** (`tests/golden/geometry.json`): 12 primitive cases. Counts and a digest of the connectivity must match exactly. Bounds, area, volume and UV sums must match within a tolerance, because trigonometry may differ in the last bit between platforms' libm.
+- **Golden geometry** (`tests/golden/geometry.json`, `tests/golden/mesh_ops.json`): 12 primitive cases and 14 mesh-operator cases, each a short `scene.apply` op list. Counts and a digest of the connectivity must match exactly. Bounds, area, volume and UV sums must match within a tolerance, because trigonometry may differ in the last bit between platforms' libm.
 - **Golden render** (`tests/golden/render/`): 5 previews replayed from command logs, compared by PSNR (≥ 40 dB) and the share of pixels off by more than 8 levels (≤ 0.2%).
 
 The official MCP conformance suite tests servers over HTTP only, so it joins CI with Streamable HTTP in P3. Until then `scripts/inspector-session.sh` drives the server with MCP Inspector over stdio in both protocol eras, with `--strict` schema checks. Still to come: FLIP for renders, Blender parity, fuzzing, benchmark gates and agent evaluation.
@@ -109,8 +113,9 @@ Measured on a phone (MediaTek Dimensity 9400, 8 cores, ReleaseSafe). The TRD's t
 | Cold start to first `server/discover` response | 16 ms median | ≤ 50 ms |
 | Non-geometry tool on a 1.3 M-triangle scene | 2–5 ms | ≤ 20 ms p95 |
 | `render.preview` 512×512, 1.3 M triangles | 140 ms first, ~84 ms after | ≤ 150 ms for 1 M |
-| Binary size (ReleaseSafe, not stripped) | 6.5 MB | ≤ 30 MB |
-| `tools/list` payload | 37.8 KB | ≤ 40 KB (hard cap raised to 60 KB) |
+| Mesh operator on a 100,489-face grid (whole call) | extrude 105 ms, inset 110 ms, triangulate 119 ms, merge by distance 144 ms; individual-face extrude or inset 285 ms (5× the output) | ≤ 200 ms for a 100 k-face selection |
+| Binary size (ReleaseSafe, not stripped) | 9.4 MB | ≤ 30 MB |
+| `tools/list` payload | 40.7 KB | ≤ 40 KB (hard cap raised to 60 KB) |
 | Idle RSS (`scripts/measure-memory.mjs`) | 1.5 MB | ≤ 30 MB |
 | RSS over mesh bytes, 1 M-triangle scene after a preview | 1.55× | ≤ 2.5× |
 

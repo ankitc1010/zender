@@ -1,0 +1,366 @@
+{
+ "extrude_cube_top": {
+  "points": 12,
+  "edges": 20,
+  "faces": 10,
+  "corners": 40,
+  "smooth_faces": 0,
+  "topology": "651d8543b82f3806",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1.5
+   ]
+  ],
+  "area": 28,
+  "volume": 9.999999999999996,
+  "uv_sum": [
+   24,
+   23
+  ]
+ },
+ "extrude_individual_grid": {
+  "points": 28,
+  "edges": 48,
+  "faces": 21,
+  "corners": 84,
+  "smooth_faces": 0,
+  "topology": "c75aa636897f2194",
+  "bounds": [
+   [
+    -1,
+    -1,
+    0
+   ],
+   [
+    1,
+    1,
+    0.20000000298023224
+   ]
+  ],
+  "area": 5.600000023841858,
+  "volume": 0.26666667064031,
+  "uv_sum": [
+   42.00000083446503,
+   42.00000083446503
+  ]
+ },
+ "extrude_edges_and_verts": {
+  "points": 7,
+  "edges": 8,
+  "faces": 2,
+  "corners": 8,
+  "smooth_faces": 0,
+  "topology": "18593356e506595c",
+  "bounds": [
+   [
+    -1,
+    -1,
+    0
+   ],
+   [
+    1,
+    1.5,
+    1
+   ]
+  ],
+  "area": 5.414213562373095,
+  "volume": -0.3333333333333333,
+  "uv_sum": [
+   4,
+   6
+  ]
+ },
+ "inset_cube_top": {
+  "points": 12,
+  "edges": 20,
+  "faces": 10,
+  "corners": 40,
+  "smooth_faces": 0,
+  "topology": "651d8543b82f3806",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 24.411774805848353,
+  "volume": 7.416000042438507,
+  "uv_sum": [
+   24,
+   23
+  ]
+ },
+ "inset_region_grid": {
+  "points": 33,
+  "edges": 56,
+  "faces": 24,
+  "corners": 96,
+  "smooth_faces": 0,
+  "topology": "8c1befcb2f1fdf5a",
+  "bounds": [
+   [
+    -1,
+    -1,
+    0
+   ],
+   [
+    1,
+    1,
+    0.10000000149011612
+   ]
+  ],
+  "area": 4.149116893519899,
+  "volume": 0.08133333557844163,
+  "uv_sum": [
+   48,
+   48
+  ]
+ },
+ "inset_individual_cylinder": {
+  "points": 48,
+  "edges": 88,
+  "faces": 42,
+  "corners": 176,
+  "smooth_faces": 0,
+  "topology": "65432d06324654d7",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 18.785948185187426,
+  "volume": 5.0985349082117555,
+  "uv_sum": [
+   88.00000016391277,
+   52
+  ]
+ },
+ "triangulate_uv_sphere": {
+  "points": 62,
+  "edges": 180,
+  "faces": 120,
+  "corners": 360,
+  "smooth_faces": 0,
+  "topology": "20d7cdf8d95bc401",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 11.861288474099725,
+  "volume": 3.7320508672756376,
+  "uv_sum": [
+   180.000000230968,
+   179.9999953508377
+  ]
+ },
+ "triangulate_cylinder_caps": {
+  "points": 64,
+  "edges": 154,
+  "faces": 92,
+  "corners": 308,
+  "smooth_faces": 0,
+  "topology": "ac8593c8a52a16e4",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 18.78908419805527,
+  "volume": 6.242890270276593,
+  "uv_sum": [
+   154.14458161592484,
+   166.6498568058014
+  ]
+ },
+ "triangulate_grid_alternate": {
+  "points": 16,
+  "edges": 33,
+  "faces": 18,
+  "corners": 54,
+  "smooth_faces": 0,
+  "topology": "869714f08615fa87",
+  "bounds": [
+   [
+    -1,
+    -1,
+    0
+   ],
+   [
+    1,
+    1,
+    0
+   ]
+  ],
+  "area": 4,
+  "volume": 0,
+  "uv_sum": [
+   27.000000536441803,
+   27.000000536441803
+  ]
+ },
+ "merge_cube_top_center": {
+  "points": 5,
+  "edges": 8,
+  "faces": 5,
+  "corners": 16,
+  "smooth_faces": 0,
+  "topology": "5636220ce938ca04",
+  "bounds": [
+   [
+    -1,
+    -1,
+    -1
+   ],
+   [
+    1,
+    1,
+    1
+   ]
+  ],
+  "area": 12.94427190999916,
+  "volume": 2.6666666666666665,
+  "uv_sum": [
+   6.5,
+   8
+  ]
+ },
+ "merge_distance_after_individual": {
+  "points": 9,
+  "edges": 12,
+  "faces": 4,
+  "corners": 16,
+  "smooth_faces": 0,
+  "topology": "2b7a3b6a5a2f3d59",
+  "bounds": [
+   [
+    -1,
+    -1,
+    0
+   ],
+   [
+    1,
+    1,
+    0
+   ]
+  ],
+  "area": 4,
+  "volume": 0,
+  "uv_sum": [
+   8,
+   8
+  ]
+ },
+ "merge_collapse_rows": {
+  "points": 10,
+  "edges": 18,
+  "faces": 9,
+  "corners": 30,
+  "smooth_faces": 0,
+  "topology": "e4f64c234fb26763",
+  "bounds": [
+   [
+    -1,
+    -1,
+    0
+   ],
+   [
+    1,
+    1,
+    0
+   ]
+  ],
+  "area": 2.6666666865348816,
+  "volume": 0,
+  "uv_sum": [
+   15.000000298023224,
+   15.000000357627869
+  ]
+ },
+ "transform_sphere_top": {
+  "points": 114,
+  "edges": 240,
+  "faces": 128,
+  "corners": 480,
+  "smooth_faces": 0,
+  "topology": "4db834ef57a046c4",
+  "bounds": [
+   [
+    -1.0606601238250732,
+    -1.0606601238250732,
+    -1
+   ],
+   [
+    1.0606601238250732,
+    1.0606601238250732,
+    1.5
+   ]
+  ],
+  "area": 16.910307830386003,
+  "volume": 5.893490721630586,
+  "uv_sum": [
+   240,
+   240
+  ]
+ },
+ "rotated_torus_inset_extrude": {
+  "points": 716,
+  "edges": 1432,
+  "faces": 716,
+  "corners": 2864,
+  "smooth_faces": 0,
+  "topology": "e22624f345a59a33",
+  "bounds": [
+   [
+    -1.25,
+    -1.25,
+    -0.25
+   ],
+   [
+    1.25,
+    1.2668054103851318,
+    0.29928889870643616
+   ]
+  ],
+  "area": 10.118628203253055,
+  "volume": 1.2475324160244559,
+  "uv_sum": [
+   1291.9999997392297,
+   1368.0000029206276
+  ]
+ }
+}

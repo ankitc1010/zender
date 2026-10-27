@@ -1,5 +1,6 @@
 //! Golden suites (TRD §15): geometry and render outputs compared with the
-//! files in tests/golden/. `zig build test -Dupdate-golden` rewrites them
+//! files in tests/golden/. Geometry covers the primitives (geometry.json)
+//! and each mesh operator (mesh_ops.json). `zig build test -Dupdate-golden` rewrites them
 //! from the current output; review the diff before committing it.
 //!
 //! Geometry: per case, exact element counts, smooth-face count and a digest
@@ -42,6 +43,74 @@ const geometry_cases = [_]GeometryCase{
     .{ .name = "cone", .kind = .cone },
     .{ .name = "cone_frustum_12", .kind = .cone, .params = .{ .segments = 12, .radius_top = 0.5 } },
     .{ .name = "torus", .kind = .torus },
+};
+
+/// A mesh-operator case: `ops` (a scene.apply op list) builds the scene;
+/// the stats are taken from `object`'s mesh.
+const OpsCase = struct { name: []const u8, object: []const u8, ops: []const u8 };
+
+const ops_cases = [_]OpsCase{
+    .{ .name = "extrude_cube_top", .object = "Cube", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube"}},
+    \\ {"tool":"mesh.extrude","arguments":{"object":"Cube","selector":{"normal":[0,0,1]},"distance":0.5}}]
+    },
+    .{ .name = "extrude_individual_grid", .object = "Grid", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"grid","grid_subdivisions":3}},
+    \\ {"tool":"mesh.extrude","arguments":{"object":"Grid","selector":{"index":[0,4,8]},"offset":[0,0,0.2],"mode":"individual"}}]
+    },
+    .{ .name = "extrude_edges_and_verts", .object = "Plane", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"plane"}},
+    \\ {"tool":"mesh.extrude","arguments":{"object":"Plane","selector":{"domain":"edge","where":"y > 0.99"},"offset":[0,0.5,0.5]}},
+    \\ {"tool":"mesh.extrude","arguments":{"object":"Plane","selector":{"domain":"vert","where":["x < -0.99","y < -0.99"]},"distance":1}}]
+    },
+    .{ .name = "inset_cube_top", .object = "Cube", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube"}},
+    \\ {"tool":"mesh.inset","arguments":{"object":"Cube","selector":{"normal":[0,0,1]},"thickness":0.3,"depth":-0.2}}]
+    },
+    .{ .name = "inset_region_grid", .object = "Grid", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"grid","grid_subdivisions":4}},
+    \\ {"tool":"mesh.inset","arguments":{"object":"Grid","selector":{"box":{"min":[-0.6,-0.6,-1],"max":[0.6,0.6,1]}},"thickness":0.1,"depth":0.1}}]
+    },
+    .{ .name = "inset_individual_cylinder", .object = "Cylinder", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cylinder","segments":8,"rotation":[90,0,0]}},
+    \\ {"tool":"mesh.inset","arguments":{"object":"Cylinder","selector":{"where":"area < 2"},"thickness":0.05,"depth":-0.05,"mode":"individual"}}]
+    },
+    .{ .name = "triangulate_uv_sphere", .object = "Sphere", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"uv_sphere","segments":12,"rings":6}},
+    \\ {"tool":"mesh.triangulate","arguments":{"object":"Sphere"}}]
+    },
+    .{ .name = "triangulate_cylinder_caps", .object = "Cylinder", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cylinder"}},
+    \\ {"tool":"mesh.triangulate","arguments":{"object":"Cylinder","selector":{"where":"abs(nz) > 0.9"}}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"cylinder","name":"Clip"}},
+    \\ {"tool":"mesh.triangulate","arguments":{"object":"Clip","selector":{"where":"abs(nz) > 0.9"},"ngon_method":"clip"}}]
+    },
+    .{ .name = "triangulate_grid_alternate", .object = "Grid", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"grid","grid_subdivisions":3}},
+    \\ {"tool":"mesh.triangulate","arguments":{"object":"Grid","quad_method":"alternate"}}]
+    },
+    .{ .name = "merge_cube_top_center", .object = "Cube", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"cube"}},
+    \\ {"tool":"mesh.merge","arguments":{"object":"Cube","selector":{"domain":"face","normal":[0,0,1]}}}]
+    },
+    .{ .name = "merge_distance_after_individual", .object = "Grid", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"grid","grid_subdivisions":2}},
+    \\ {"tool":"mesh.extrude","arguments":{"object":"Grid","selector":{},"offset":[0,0,0],"mode":"individual"}},
+    \\ {"tool":"mesh.merge","arguments":{"object":"Grid","selector":{},"mode":"distance","threshold":0.001}}]
+    },
+    .{ .name = "merge_collapse_rows", .object = "Grid", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"grid","grid_subdivisions":3}},
+    \\ {"tool":"mesh.merge","arguments":{"object":"Grid","selector":{"domain":"vert","where":"abs(y) > 0.99"},"mode":"collapse"}}]
+    },
+    .{ .name = "transform_sphere_top", .object = "Sphere", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"uv_sphere","segments":16,"rings":8,"location":[1,2,3]}},
+    \\ {"tool":"mesh.transform_elements","arguments":{"object":"Sphere","selector":{"domain":"vert","where":"z > 3.5"},"scale":[1.5,1.5,1],"rotate":[0,0,45],"translate":[0,0,0.5]}}]
+    },
+    .{ .name = "rotated_torus_inset_extrude", .object = "Torus", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"torus","rotation":[30,0,0],"scale":[1,1,2]}},
+    \\ {"tool":"mesh.inset","arguments":{"object":"Torus","selector":{"where":"z > 0.4"},"thickness":0.02}},
+    \\ {"tool":"mesh.extrude","arguments":{"object":"Torus","selector":{"where":"z > 0.4"},"distance":0.1}}]
+    },
 };
 
 const RenderCase = struct {
@@ -224,21 +293,61 @@ test "golden geometry: primitives" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const path = try goldenPath(arena, &.{"geometry.json"});
-
+    var names: [geometry_cases.len][]const u8 = undefined;
     var stats: [geometry_cases.len]Stats = undefined;
-    for (geometry_cases, &stats) |c, *s| {
+    for (geometry_cases, &names, &stats) |c, *n, *s| {
         var m = try prims.generate(testing.allocator, c.kind, c.params);
         defer m.releaseRefs(testing.allocator);
+        n.* = c.name;
         s.* = statsOf(&m);
     }
+    try checkStats(arena, "geometry.json", &names, &stats, &.{});
+}
 
+test "golden geometry: mesh operators" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const roots = try arena.alloc([]const u8, 1);
+    roots[0] = options.dir;
+    var server = cmd.Server.init(testing.allocator, testing.io, .{ .io = testing.io, .threads = 4 }, .{ .roots = .{ .list = roots } }, cmd.catalog.tools);
+    defer server.deinit();
+
+    var problems: std.ArrayList([]const u8) = .empty;
+    var names: [ops_cases.len][]const u8 = undefined;
+    var stats: [ops_cases.len]Stats = undefined;
+    for (ops_cases, &names, &stats) |c, *n, *s| {
+        n.* = c.name;
+        const created = try server.call(arena, "scene.create", null);
+        const id = (try std.json.parseFromSliceLeaky(Value, arena, created.ok.structured, .{})).object.get("scene_id").?.string;
+        var args: std.json.ObjectMap = .empty;
+        try args.put(arena, "scene_id", .{ .string = id });
+        try args.put(arena, "ops", try std.json.parseFromSliceLeaky(Value, arena, c.ops, .{}));
+        const out = try server.call(arena, "scene.apply", .{ .object = args });
+        if (out != .ok) {
+            try problems.append(arena, try std.fmt.allocPrint(arena, "{s}: scene.apply failed: {s} at {s}", .{ c.name, out.tool_error.message, out.tool_error.path }));
+            s.* = std.mem.zeroes(Stats);
+            continue;
+        }
+        const doc = &server.scenes.get(id).?.doc;
+        const ob = doc.db.get(.object, doc.db.findByName(.object, c.object).?).?;
+        s.* = statsOf(doc.db.get(.mesh, ob.data.?).?);
+    }
+    try checkStats(arena, "mesh_ops.json", &names, &stats, problems.items);
+}
+
+/// Writes (with -Dupdate-golden) or checks one stats file.
+fn checkStats(arena: Allocator, file: []const u8, names: []const []const u8, stats: []const Stats, earlier: []const []const u8) !void {
+    const path = try goldenPath(arena, &.{file});
+    var problems: std.ArrayList([]const u8) = .empty;
+    try problems.appendSlice(arena, earlier);
     if (options.update) {
+        try report(problems.items);
         var out: std.Io.Writer.Allocating = .init(arena);
         var w: Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_1 } };
         try w.beginObject();
-        for (geometry_cases, stats) |c, s| {
-            try w.objectField(c.name);
+        for (names, stats) |n, s| {
+            try w.objectField(n);
             try writeStats(&w, s);
         }
         try w.endObject();
@@ -248,15 +357,14 @@ test "golden geometry: primitives" {
     }
 
     const golden = try std.json.parseFromSliceLeaky(Value, arena, try readFile(arena, path), .{});
-    var problems: std.ArrayList([]const u8) = .empty;
-    for (geometry_cases, stats) |c, s| {
-        const g = golden.object.get(c.name) orelse {
-            try problems.append(arena, try std.fmt.allocPrint(arena, "{s}: no golden entry", .{c.name}));
+    for (names, stats) |n, s| {
+        const g = golden.object.get(n) orelse {
+            try problems.append(arena, try std.fmt.allocPrint(arena, "{s}: no golden entry", .{n}));
             continue;
         };
-        try compareStats(arena, c.name, s, g.object, &problems);
+        try compareStats(arena, n, s, g.object, &problems);
     }
-    if (golden.object.count() != geometry_cases.len) try problems.append(arena, "geometry.json has entries for cases that no longer exist");
+    if (golden.object.count() != names.len) try problems.append(arena, try std.fmt.allocPrint(arena, "{s} has entries for cases that no longer exist", .{file}));
     try report(problems.items);
 }
 

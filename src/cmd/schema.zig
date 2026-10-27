@@ -49,6 +49,8 @@ pub const Type = union(enum) {
     properties: *const fn (*Stringify) Stringify.Error!void,
     /// scene.apply's op list.
     ops,
+    /// A mesh element selector (cmd/selector.zig); the handler parses it.
+    selector,
 };
 
 pub const Default = union(enum) {
@@ -236,6 +238,10 @@ fn writeParamSchema(p: Param, w: *Stringify) Stringify.Error!void {
             try w.objectField("required");
             try w.write(&[_][]const u8{"tool"});
             try w.endObject();
+        },
+        .selector => {
+            try w.objectField("type");
+            try w.write("object");
         },
         .properties => unreachable,
     }
@@ -457,6 +463,10 @@ fn check(arena: Allocator, p: Param, val: Value, failure: *Failure) Allocator.Er
         .properties => return switch (val) {
             .object => val,
             else => fail(arena, failure, p, "", "'{s}' must be an object of property values", .{p.name}),
+        },
+        .selector => return switch (val) {
+            .object => val,
+            else => fail(arena, failure, p, "", "'{s}' must be a selector object such as {{\"normal\":[0,0,1]}}", .{p.name}),
         },
         .ops => {
             const arr = if (val == .array) val.array.items else return fail(arena, failure, p, "", "'{s}' must be an array of {{tool, arguments}} objects", .{p.name});

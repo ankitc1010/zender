@@ -315,3 +315,124 @@ test "tool calls become spans that continue the caller's trace" {
     }
     try testing.expect(saw_scene);
 }
+
+fn countsOf(v: Value) [4]i64 {
+    const c = v.object.get("counts").?.object;
+    return .{ c.get("verts").?.integer, c.get("edges").?.integer, c.get("faces").?.integer, c.get("triangles").?.integer };
+}
+
+test "mesh tools: select, extrude, inset, triangulate, merge, transform" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\",\"location\":[0,0,1],\"scale\":[2,1,0.5]}}", .{id}));
+
+    // World space: the top face's centre is at z = 1 + 0.5.
+    const top = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"normal\":[0,0,1],\"within\":10}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 1), top.object.get("count").?.integer);
+    try testing.expectEqual(@as(f64, 1.5), schemaNumber(top.object.get("center").?.array.items[2]));
+    try testing.expectEqual(@as(f64, 1), schemaNumber(top.object.get("normal").?.array.items[2]));
+
+    const ex = try f.ok("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"normal\":[0,0,1]}},\"distance\":0.5}}", .{id}));
+    try testing.expectEqual([4]i64{ 12, 20, 10, 20 }, countsOf(ex));
+    const cap = ex.object.get("result").?;
+    try testing.expectEqualStrings("face", cap.object.get("domain").?.string);
+    const raised = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"vert\",\"where\":\"z > 1.99\"}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 4), raised.object.get("count").?.integer);
+
+    // The result selector feeds the next call as is.
+    var cap_json: std.Io.Writer.Allocating = .init(f.arena_state.allocator());
+    try std.json.Stringify.value(cap, .{}, &cap_json.writer);
+    const in = try f.ok("mesh.inset", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{s},\"thickness\":0.1,\"depth\":-0.2}}", .{ id, cap_json.written() }));
+    try testing.expectEqual(@as(i64, 14), countsOf(in)[2]);
+    try testing.expectEqual(@as(usize, 0), in.object.get("warnings").?.array.items.len);
+    const sunk = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"vert\",\"where\":[\"z > 1.79\",\"z < 1.81\"]}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 4), sunk.object.get("count").?.integer);
+
+    const moved = try f.ok("mesh.transform_elements", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"vert\",\"where\":\"z > 1.99\"}},\"scale\":[0.5,0.5,1],\"translate\":[0,0,0.25]}}", .{id}));
+    try testing.expectEqual(@as(usize, 1), moved.object.get("result").?.object.get("index").?.array.items.len);
+    const lifted = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"vert\",\"where\":\"z > 2.2\"}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 4), lifted.object.get("count").?.integer);
+    try testing.expectEqual(@as(f64, 1), schemaNumber(lifted.object.get("bounds").?.object.get("max").?.array.items[0]));
+
+    const tri = try f.ok("mesh.triangulate", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\"}}", .{id}));
+    const tc = countsOf(tri);
+    try testing.expectEqual(tc[2], tc[3]);
+    try testing.expectEqual(@as(i64, 28), tc[2]);
+
+    const none_merged = try f.ok("mesh.merge", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{}},\"mode\":\"distance\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 0), none_merged.object.get("merged").?.integer);
+    const apex = try f.ok("mesh.merge", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"vert\",\"where\":\"z > 2.2\"}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 3), apex.object.get("merged").?.integer);
+    try testing.expect(apex.object.get("warnings").?.array.items.len > 0);
+
+    // Errors name the argument and suggest a fix.
+    const unknown = try f.call("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"where\":\"weight > 0\"}},\"distance\":1}}", .{id}));
+    try testing.expectEqual(server_mod.ErrorCode.not_found, unknown.tool_error.code);
+    try testing.expect(unknown.tool_error.valid_values.len > 0);
+    const stale = try f.call("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"index\":[999]}},\"distance\":1}}", .{id}));
+    try testing.expectEqual(server_mod.ErrorCode.invalid_argument, stale.tool_error.code);
+    const empty = try f.call("mesh.inset", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"where\":\"z > 100\"}}}}", .{id}));
+    try testing.expectEqualStrings("/selector", empty.tool_error.path);
+    const bad = try f.call("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"box\":{{\"min\":[0,0]}}}},\"distance\":1}}", .{id}));
+    try testing.expectEqualStrings("/selector/box/min", bad.tool_error.path);
+    const area_on_edges = try f.call("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"domain\":\"edge\",\"where\":\"area > 1\"}},\"distance\":1}}", .{id}));
+    try testing.expectEqualStrings("/selector/where", area_on_edges.tool_error.path);
+    const corner_normals = try f.call("mesh.merge", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"normal\":[0,0,-1],\"within\":5}}}}", .{id}));
+    try testing.expect(std.mem.indexOf(u8, corner_normals.tool_error.hint, "domain face") != null);
+    const no_dist = try f.call("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{}}}}", .{id}));
+    try testing.expectEqualStrings("/distance", no_dist.tool_error.path);
+    _ = try f.ok("camera.add", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
+    const cam = try f.call("mesh.triangulate", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Camera\"}}", .{id}));
+    try testing.expectEqualStrings("/object", cam.tool_error.path);
+
+    // Undo walks back through camera.add, both merges, triangulate and
+    // the transform to the inset mesh.
+    for (0..5) |_| _ = try f.ok("scene.undo", try f.fmt("{{\"scene_id\":\"{s}\"}}", .{id}));
+    const back = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\"}}", .{id}));
+    try testing.expectEqual([4]i64{ 16, 28, 14, 28 }, countsOf(back));
+}
+
+fn schemaNumber(v: Value) f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |x| @round(x * 1e5) / 1e5,
+        else => std.math.nan(f64),
+    };
+}
+
+test "mesh edits replay byte-identically and do not depend on threads" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const arena = f.arena_state.allocator();
+    var hash: ?u64 = null;
+    for ([_]usize{ 1, 8 }) |threads| {
+        f.server.pool.threads = threads;
+        const id = try f.createScene();
+        _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cylinder\",\"segments\":12,\"rotation\":[0,30,0]}}", .{id}));
+        _ = try f.ok("mesh.inset", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Cylinder\",\"selector\":{{\"where\":\"abs(nz) < 0.5\"}},\"thickness\":0.05,\"depth\":-0.05,\"mode\":\"individual\"}}", .{id}));
+        _ = try f.ok("mesh.extrude", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Cylinder\",\"selector\":{{\"normal\":[0,0,1],\"within\":45}},\"distance\":0.3}}", .{id}));
+        _ = try f.ok("mesh.triangulate", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Cylinder\",\"selector\":{{\"where\":\"area > 0.5\"}}}}", .{id}));
+        _ = try f.ok("mesh.transform_elements", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Cylinder\",\"selector\":{{\"domain\":\"vert\",\"box\":{{\"min\":[-2,-2,0.5],\"max\":[2,2,3]}}}},\"rotate\":[0,0,15]}}", .{id}));
+        _ = try f.ok("mesh.merge", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Cylinder\",\"selector\":{{\"domain\":\"face\",\"index\":[3]}},\"mode\":\"collapse\"}}", .{id}));
+        const path = try f.fmt("m{d}.json", .{threads});
+        _ = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"{s}\"}}", .{ id, path }));
+        const bytes = try f.tmp.dir.readFileAlloc(testing.io, path, arena, .limited(1 << 22));
+        const h = std.hash.Wyhash.hash(0, bytes);
+        if (hash) |want| try testing.expectEqual(want, h) else hash = h;
+
+        const entry = f.server.scenes.get(id).?;
+        var log: std.ArrayList(u8) = .empty;
+        for (entry.log.items) |rec| {
+            try log.appendSlice(arena, rec);
+            try log.append(arena, '\n');
+        }
+        const r = try replay.run(&f.server, arena, log.items);
+        try testing.expectEqual(@as(usize, 0), r.failed_line);
+        const again = try f.fmt("r{d}.json", .{threads});
+        _ = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"{s}\"}}", .{ r.scene_id, again }));
+        try testing.expectEqualSlices(u8, bytes, try f.tmp.dir.readFileAlloc(testing.io, again, arena, .limited(1 << 22)));
+    }
+}
