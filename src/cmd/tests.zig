@@ -523,6 +523,29 @@ test "mesh.boolean cuts, hides or deletes the operand, and explains failures" {
     try testing.expectEqual(server_mod.ErrorCode.not_found, deleted.tool_error.code);
 }
 
+test "soft selection and smoothing" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"grid\",\"name\":\"G\",\"grid_subdivisions\":4}}", .{id}));
+    // The centre vertex rises 1 m; with a linear 1 m falloff its four
+    // neighbours 0.5 m away rise exactly halfway.
+    const up = try f.ok("mesh.transform_elements", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"selector\":{{\"domain\":\"vert\",\"where\":[\"abs(x) < 0.01\",\"abs(y) < 0.01\"]}},\"translate\":[0,0,1],\"falloff\":1,\"falloff_curve\":\"linear\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 9), up.object.get("affected").?.integer);
+    const half = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"selector\":{{\"domain\":\"vert\",\"where\":[\"z > 0.499\",\"z < 0.501\"]}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 4), half.object.get("count").?.integer);
+
+    // Smoothing pulls the peak down; the open border stays pinned.
+    const sm = try f.ok("mesh.smooth", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"iterations\":10}}", .{id}));
+    try testing.expect(sm.object.get("affected").?.integer == 25);
+    const peak = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"selector\":{{\"domain\":\"vert\"}}}}", .{id}));
+    const top = schemaNumber(peak.object.get("bounds").?.object.get("max").?.array.items[2]);
+    try testing.expect(top < 0.9 and top > 0.1);
+    const border = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"G\",\"selector\":{{\"domain\":\"vert\",\"where\":[\"abs(x) > 0.99\",\"abs(z) < 0.000001\"]}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 10), border.object.get("count").?.integer);
+}
+
 fn schemaNumber(v: Value) f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),

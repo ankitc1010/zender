@@ -21,6 +21,8 @@ pub const transform = @import("ops/transform.zig");
 pub const loopcut = @import("ops/loopcut.zig");
 pub const bevel = @import("ops/bevel.zig");
 pub const boolean = @import("ops/boolean.zig");
+pub const falloff = @import("ops/falloff.zig");
+pub const smooth = @import("ops/smooth.zig");
 
 /// The object's world matrix with the inverses operators need.
 pub const Xform = struct {
@@ -93,4 +95,6 @@ test {
     _ = loopcut;
     _ = bevel;
     _ = boolean;
+    _ = falloff;
+    _ = smooth;
 }

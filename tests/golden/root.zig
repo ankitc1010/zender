@@ -151,6 +151,17 @@ const ops_cases = [_]OpsCase{
     \\ {"tool":"object.add_primitive","arguments":{"kind":"cube","name":"Box","size":1.6}},
     \\ {"tool":"mesh.boolean","arguments":{"object":"Ball","operand":"Box","operation":"intersect"}}]
     },
+    .{ .name = "soft_bump_on_grid", .object = "Grid", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"grid","grid_subdivisions":12}},
+    \\ {"tool":"mesh.transform_elements","arguments":{"object":"Grid","selector":{"domain":"vert","sphere":{"center":[0.25,0,0],"radius":0.1}},"translate":[0,0,0.6],"falloff":0.7}},
+    \\ {"tool":"mesh.transform_elements","arguments":{"object":"Grid","selector":{"domain":"vert","where":"x < -0.8"},"scale":[1,1,0],"translate":[0,0,0.2],"falloff":0.5,"falloff_curve":"sphere","falloff_connected":true}}]
+    },
+    .{ .name = "smooth_union_seam", .object = "Ball", .ops =
+    \\[{"tool":"object.add_primitive","arguments":{"kind":"uv_sphere","name":"Ball","segments":24,"rings":12}},
+    \\ {"tool":"object.add_primitive","arguments":{"kind":"uv_sphere","name":"Bump","radius":0.4,"segments":16,"rings":8,"location":[0,-0.9,0]}},
+    \\ {"tool":"mesh.boolean","arguments":{"object":"Ball","operand":"Bump","operation":"union","operand_action":"delete"}},
+    \\ {"tool":"mesh.smooth","arguments":{"object":"Ball","selector":{"domain":"vert","sphere":{"center":[0,-1,0],"radius":0.5}},"iterations":8,"falloff":0.3}}]
+    },
     .{ .name = "uv_unwrap_smart_torus", .object = "Torus", .ops =
     \\[{"tool":"object.add_primitive","arguments":{"kind":"torus"}},
     \\ {"tool":"mesh.uv_unwrap","arguments":{"object":"Torus"}}]

@@ -36,6 +36,25 @@ fn selectorParam(comptime domain: []const u8, comptime required: bool) Param {
     };
 }
 
+/// Soft selection: shared by the tools that move or smooth vertices.
+const falloff_params = [_]Param{
+    .{ .name = "falloff", .type = .{ .number = .{ .min = 0, .max = 1e6, .unit = .metres } }, .doc = "Soft selection radius: vertices this close to the selection follow, fading out", .default = .{ .number = 0 } },
+    .{ .name = "falloff_curve", .type = .{ .enumeration = &.{ "smooth", "sphere", "root", "linear", "sharp", "constant" } }, .doc = "Fade shape", .default = .{ .string = "smooth" } },
+    .{ .name = "falloff_connected", .type = .boolean, .doc = "Measure along edges, so nearby parts that are not connected stay put", .default = .{ .boolean = false } },
+};
+
+fn falloffArgs(c: *Call) ops.falloff.Params {
+    return .{
+        .radius = @floatCast(c.args.float("falloff").?),
+        .curve = std.meta.stringToEnum(ops.falloff.Curve, c.args.str("falloff_curve").?).?,
+        .connected = c.args.boolean("falloff_connected").?,
+    };
+}
+
+fn stopOf(c: *Call) ?geom.editmesh.Stop {
+    return if (c.server.pool.deadline) |d| .{ .deadline = d, .io = c.server.io } else null;
+}
+
 const mode_param: Param = .{ .name = "mode", .type = .{ .enumeration = &.{ "region", "individual" } }, .doc = "region treats touching faces as one; individual does each face on its own", .default = .{ .string = "region" } };
 
 pub const tools = [_]Tool{
@@ -51,8 +70,8 @@ pub const tools = [_]Tool{
     .{
         .name = "mesh.transform_elements",
         .title = "Transform elements",
-        .description = "Move, rotate (Euler XYZ, deg) and scale selected vertices along world axes: scale, then rotate, about the pivot, then translate (m). Faces and edges move their vertices. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Cube\",\"selector\":{\"domain\":\"vert\",\"where\":\"z > 0\"},\"scale\":[0.5,0.5,1]}.",
-        .params = common.mutating(&.{
+        .description = "Move, rotate (Euler XYZ, deg) and scale selected vertices along world axes: scale, then rotate, about the pivot, then translate (m). Faces and edges move their vertices. With falloff (m), nearby vertices follow partway (soft selection), for smooth organic shaping. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Cube\",\"selector\":{\"domain\":\"vert\",\"where\":\"z > 0\"},\"scale\":[0.5,0.5,1]}.",
+        .params = common.mutating(&([_]Param{
             object_param,
             selectorParam("vert", true),
             .{ .name = "translate", .type = .{ .vec3 = .{ .min = -1e9, .max = 1e9, .unit = .metres } }, .doc = "Offset [x, y, z]", .default = .{ .vec3 = .{ 0, 0, 0 } } },
@@ -60,7 +79,7 @@ pub const tools = [_]Tool{
             .{ .name = "scale", .type = .{ .vec3 = .{ .min = -1e6, .max = 1e6 } }, .doc = "Scale about the pivot", .default = .{ .vec3 = .{ 1, 1, 1 } } },
             .{ .name = "pivot", .type = .{ .enumeration = &.{ "median", "bounds", "origin", "point" } }, .doc = "median of the vertices, centre of their bounds, object origin, or 'point'", .default = .{ .string = "median" } },
             .{ .name = "point", .type = .{ .vec3 = .{ .min = -1e9, .max = 1e9, .unit = .metres } }, .doc = "Pivot when pivot is 'point'" },
-        }),
+        } ++ falloff_params)),
         .kind = .mutating,
         .handler = transformElements,
     },
@@ -170,6 +189,21 @@ pub const tools = [_]Tool{
         }),
         .kind = .mutating,
         .handler = boolean,
+    },
+    .{
+        .name = "mesh.smooth",
+        .title = "Smooth vertices",
+        .description = "Relax selected vertices toward their neighbours, iterations times by factor, removing lumps and blending seams (e.g. where a union joined a nose to a face). preserve_volume keeps the size (Taubin smoothing); boundary vertices stay put unless pin_boundary is false. With falloff (m) the effect fades out around the selection. The selected vertices are the result. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Head\",\"selector\":{\"domain\":\"vert\",\"sphere\":{\"center\":[0,-0.9,-0.1],\"radius\":0.25}},\"iterations\":10}.",
+        .params = common.mutating(&([_]Param{
+            object_param,
+            selectorParam("vert", false),
+            .{ .name = "iterations", .type = .{ .integer = .{ .min = 1, .max = ops.smooth.max_iterations } }, .doc = "Passes", .default = .{ .integer = 5 } },
+            .{ .name = "factor", .type = .{ .number = .{ .min = 0, .max = 1 } }, .doc = "Fraction of the way to the neighbour mean per pass", .default = .{ .number = 0.5 } },
+            .{ .name = "preserve_volume", .type = .boolean, .doc = "Counter each pass so the shape does not shrink", .default = .{ .boolean = true } },
+            .{ .name = "pin_boundary", .type = .boolean, .doc = "Keep vertices on open edges fixed", .default = .{ .boolean = true } },
+        } ++ falloff_params)),
+        .kind = .mutating,
+        .handler = smoothVerts,
     },
 };
 
@@ -377,20 +411,38 @@ fn transformElements(c: *Call) HandlerError!void {
     const zero: math.Vec3 = .{ 0, 0, 0 };
     const one: math.Vec3 = .{ 1, 1, 1 };
     const identity = std.mem.eql(f32, &p.translate, &zero) and std.mem.eql(f32, &rotate, &zero) and std.mem.eql(f32, &p.scale, &one);
+    const soft = falloffArgs(c);
+    var affected: usize = verts.count();
     if (identity) {
         try c.warn("translate, rotate and scale are all neutral; nothing moved", .{});
+    } else if (soft.radius > 0) {
+        const gpa = c.doc().gpa;
+        const w = try c.arena.alloc(f32, m.vertCount());
+        ops.falloff.weights(gpa, m, &verts, xf, soft, stopOf(c), w) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.DeadlineExceeded => return error.ToolFailed,
+        };
+        affected = 0;
+        for (w) |x| affected += @intFromBool(x > 0);
+        ops.transform.applyWeighted(try m.positions.mut(gpa), w, xf, p);
     } else {
         ops.transform.apply(try m.positions.mut(c.doc().gpa), &verts, xf, p);
-        for (m.positions.slice()) |q| for (q) |x| if (!std.math.isFinite(x)) {
-            return c.fail(.invalid_argument, "the transform produced non-finite positions; nothing changed", .{});
-        };
     }
+    if (!identity) for (m.positions.slice()) |q| for (q) |x| if (!std.math.isFinite(x)) {
+        return c.fail(.invalid_argument, "the transform produced non-finite positions; nothing changed", .{});
+    };
     try noteShared(c, t);
     try c.markChanged(t.mh, m.name.slice());
     const moved = try indices(c, &verts);
     try writeResult(c, .vert, moved);
+    try c.field("affected");
+    try c.out.write(affected);
     try writeCounts(c, m);
-    try c.say("Transformed {d} {s} of '{s}'.", .{ moved.len, noun(.vert, moved.len), t.name(c) });
+    if (affected > moved.len) {
+        try c.say("Transformed {d} {s} of '{s}', and {d} more partway through the falloff.", .{ moved.len, noun(.vert, moved.len), t.name(c), affected - moved.len });
+    } else {
+        try c.say("Transformed {d} {s} of '{s}'.", .{ moved.len, noun(.vert, moved.len), t.name(c) });
+    }
 }
 
 /// The EditMesh round trip shared by the topology tools.
@@ -714,6 +766,39 @@ fn boolean(c: *Call) HandlerError!void {
         .intersect => "Intersected",
     };
     try c.say("{s} '{s}' with '{s}' ({s} the operand); it now has {d} verts, {d} faces.", .{ verb, t.name(c), op_name, @tagName(action), m.vertCount(), m.faceCount() });
+}
+
+fn smoothVerts(c: *Call) HandlerError!void {
+    const t = try target(c);
+    const xf = try t.editXform(c);
+    const s = try evaluate(c, t, .vert, false);
+    const m = t.mesh(c);
+    const gpa = c.doc().gpa;
+    var verts = try sel.toVerts(c.arena, m, s.s.domain, &s.bits);
+    const w = try c.arena.alloc(f32, m.vertCount());
+    ops.falloff.weights(gpa, m, &verts, xf, falloffArgs(c), stopOf(c), w) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DeadlineExceeded => return error.ToolFailed,
+    };
+    ops.smooth.smooth(gpa, m, try m.positions.mut(gpa), w, .{
+        .iterations = @intCast(c.args.int("iterations").?),
+        .factor = @floatCast(c.args.float("factor").?),
+        .preserve_volume = c.args.boolean("preserve_volume").?,
+        .pin_boundary = c.args.boolean("pin_boundary").?,
+    }, stopOf(c)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DeadlineExceeded => return error.ToolFailed,
+    };
+    var affected: usize = 0;
+    for (w) |x| affected += @intFromBool(x > 0);
+    try noteShared(c, t);
+    try c.markChanged(t.mh, m.name.slice());
+    const list = try indices(c, &verts);
+    try writeResult(c, .vert, list);
+    try c.field("affected");
+    try c.out.write(affected);
+    try writeCounts(c, m);
+    try c.say("Smoothed {d} vertices of '{s}' ({d} passes).", .{ affected, t.name(c), c.args.int("iterations").? });
 }
 
 fn merge(c: *Call) HandlerError!void {

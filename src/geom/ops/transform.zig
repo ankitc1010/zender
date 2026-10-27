@@ -33,6 +33,19 @@ pub fn apply(positions: []Vec3, verts: *const Bits, xf: Xform, p: Params) void {
     }
 }
 
+/// As `apply`, with each vertex taken `weight` of the way to where the
+/// transform would put it (soft selection); weight 1 moves it fully.
+pub fn applyWeighted(positions: []Vec3, weight: []const f32, xf: Xform, p: Params) void {
+    const r = v.quatToMat(v.quatNormalize(p.rotate));
+    for (positions, weight) |*q, w| {
+        if (w == 0) continue;
+        const wp = xf.toWorld(q.*);
+        const local = v.mul(v.sub(wp, p.pivot), p.scale);
+        const moved = v.add(v.add(p.pivot, v.transformDir(r, local)), p.translate);
+        q.* = xf.toLocal(if (w == 1) moved else v.lerp(wp, moved, w));
+    }
+}
+
 /// Mean world position of the selected vertices (Blender's median point).
 pub fn median(positions: []const Vec3, verts: *const Bits, xf: Xform) Vec3 {
     var acc: [3]f64 = .{ 0, 0, 0 };
