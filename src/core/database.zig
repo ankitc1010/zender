@@ -139,6 +139,7 @@ pub const Database = struct {
     camera: PoolFor(.camera) = .{},
     light: PoolFor(.light) = .{},
     material: PoolFor(.material) = .{},
+    image: PoolFor(.image) = .{},
     world: PoolFor(.world) = .{},
 
     pub fn init(gpa: Allocator) Database {

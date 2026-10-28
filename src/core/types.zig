@@ -454,6 +454,13 @@ pub const Material = struct {
     use_backface_culling: bool = false,
     /// Procedural textures driving inputs, at most one per input.
     textures: Shared(MaterialTexture) = .empty,
+    /// Images driving inputs (from material.bake; P2 adds loading), which
+    /// take precedence over textures where both are set.
+    base_color_image: ?IdHandle = null,
+    metallic_image: ?IdHandle = null,
+    roughness_image: ?IdHandle = null,
+    normal_image: ?IdHandle = null,
+    emission_image: ?IdHandle = null,
 
     pub const props = [_]Prop{
         .{ .name = "base_color", .field = "base_color", .kind = .color4, .unit = .factor, .min = 0, .max = 1, .doc = "Base colour, scene-linear RGBA" },
@@ -525,8 +532,64 @@ pub const Material = struct {
     }
 };
 
+pub const ColorSpace = enum { srgb, non_color };
+
+/// A raster image (Blender's Image ID): scene-linear RGBA floats, bottom
+/// row first as in Blender. sRGB images are colours and are encoded with
+/// the sRGB curve when written; non-colour images (normals, roughness)
+/// are written as they are.
+pub const Image = struct {
+    name: Name = .{},
+    width: i32 = 0,
+    height: i32 = 0,
+    pixels: Shared([4]f32) = .empty,
+    colorspace: ColorSpace = .srgb,
+
+    pub const props = [_]Prop{
+        .{ .name = "width", .field = "width", .kind = .int, .unit = .pixels, .min = 0, .max = 65536, .doc = "Width", .read_only = true },
+        .{ .name = "height", .field = "height", .kind = .int, .unit = .pixels, .min = 0, .max = 65536, .doc = "Height", .read_only = true },
+        .{ .name = "colorspace", .field = "colorspace", .kind = .enumeration, .doc = "srgb for colours, non_color for data such as normals", .blend = "colorspace_settings" },
+    };
+
+    pub fn retainRefs(im: *Image) void {
+        _ = im.pixels.retain();
+    }
+    pub fn releaseRefs(im: *Image, gpa: Allocator) void {
+        im.pixels.release(gpa);
+    }
+};
+
 /// Material inputs a procedural texture can drive.
-pub const TextureInput = enum(u8) { base_color, metallic, roughness, emission_color, normal };
+pub const TextureInput = enum(u8) {
+    base_color,
+    metallic,
+    roughness,
+    emission_color,
+    normal,
+
+    /// The material field holding this input's image.
+    pub fn imageField(comptime t: TextureInput) []const u8 {
+        return switch (t) {
+            .base_color => "base_color_image",
+            .metallic => "metallic_image",
+            .roughness => "roughness_image",
+            .emission_color => "emission_image",
+            .normal => "normal_image",
+        };
+    }
+
+    pub fn imageOf(t: TextureInput, m: *const Material) ?IdHandle {
+        return switch (t) {
+            inline else => |c| @field(m, c.imageField()),
+        };
+    }
+
+    pub fn setImage(t: TextureInput, m: *Material, h: ?IdHandle) void {
+        switch (t) {
+            inline else => |c| @field(m, c.imageField()) = h,
+        }
+    }
+};
 
 pub const MaterialTexture = struct {
     input: TextureInput,
@@ -620,9 +683,10 @@ pub fn TypeOf(comptime t: ids.IdType) type {
         .material => Material,
         .world => World,
         .curve => Curve,
-        .image, .action => @compileError("not implemented before P2"),
+        .image => Image,
+        .action => @compileError("not implemented before P2"),
     };
 }
 
 /// ID types the database stores today, in canonical order.
-pub const stored_types = [_]ids.IdType{ .scene, .collection, .object, .mesh, .curve, .camera, .light, .material, .world };
+pub const stored_types = [_]ids.IdType{ .scene, .collection, .object, .mesh, .curve, .camera, .light, .material, .image, .world };

@@ -11,6 +11,7 @@
 const std = @import("std");
 const math = @import("math");
 const ir = @import("ir");
+const png = @import("../image/png.zig");
 
 const Allocator = std.mem.Allocator;
 const Stringify = std.json.Stringify;
@@ -483,8 +484,37 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
     if (mats.items.len > 0) {
         try w.objectField("materials");
         try w.beginArray();
-        for (mats.items) |mi| try writeMaterial(&w, scene.materials[mi]);
+        // Images become PNG buffer views; glTF reads metallic (B) and
+        // roughness (G) from one texture, so those two are combined.
+        var textures: Textures = .{ .arena = arena, .scene = &scene, .bb = &bb };
+        const mat_tex = try arena.alloc(MatTextures, mats.items.len);
+        for (mats.items, 0..) |mi, k| mat_tex[k] = try textures.forMaterial(scene.materials[mi]);
+        for (mats.items, 0..) |mi, k| try writeMaterial(&w, scene.materials[mi], mat_tex[k]);
         try w.endArray();
+        if (textures.images.items.len > 0) {
+            try w.objectField("images");
+            try w.beginArray();
+            for (textures.images.items) |im| {
+                try w.beginObject();
+                try w.objectField("name");
+                try w.write(im.name);
+                try w.objectField("bufferView");
+                try w.write(im.view);
+                try w.objectField("mimeType");
+                try w.write("image/png");
+                try w.endObject();
+            }
+            try w.endArray();
+            try w.objectField("textures");
+            try w.beginArray();
+            for (0..textures.images.items.len) |i| {
+                try w.beginObject();
+                try w.objectField("source");
+                try w.write(i);
+                try w.endObject();
+            }
+            try w.endArray();
+        }
     }
 
     if (cams.items.len > 0) {
@@ -529,8 +559,11 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
                 try w.objectField("byteOffset");
                 try w.write(bv.offset);
             }
-            try w.objectField("target");
-            try w.write(bv.target);
+            // Image views have no target.
+            if (bv.target != 0) {
+                try w.objectField("target");
+                try w.write(bv.target);
+            }
             try w.endObject();
         }
         try w.endArray();
@@ -599,22 +632,131 @@ fn hasSpecular(m: ir.Material) bool {
     return m.specular_ior_level != 0.5 or !isWhite(m.specular_tint);
 }
 
-fn writeMaterial(w: *Stringify, m: ir.Material) !void {
+/// glTF texture indices of one material's inputs.
+const MatTextures = struct {
+    base_color: ?usize = null,
+    metallic_roughness: ?usize = null,
+    has_metallic: bool = false,
+    has_roughness: bool = false,
+    normal: ?usize = null,
+    emission: ?usize = null,
+};
+
+/// Encodes the scene's images as PNG buffer views, each once.
+const Textures = struct {
+    arena: Allocator,
+    scene: *const ir.Scene,
+    bb: *BufferBuilder,
+    images: std.ArrayList(struct { name: []const u8, view: usize }) = .empty,
+    by_key: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+
+    fn forMaterial(t: *Textures, m: ir.Material) !MatTextures {
+        var out: MatTextures = .{};
+        if (m.base_color_image) |i| out.base_color = try t.single(i, true);
+        if (m.normal_image) |i| out.normal = try t.single(i, false);
+        if (m.emission_image) |i| if (m.emission_strength > 0) {
+            out.emission = try t.single(i, true);
+        };
+        if (m.roughness_image != null or m.metallic_image != null) {
+            const r = m.roughness_image;
+            var mt = m.metallic_image;
+            // Both must share a size to share a texture; roughness wins.
+            if (r != null and mt != null) {
+                const a = t.scene.images[r.?];
+                const b = t.scene.images[mt.?];
+                if (a.width != b.width or a.height != b.height) mt = null;
+            }
+            out.metallic_roughness = try t.combined(r, mt);
+            out.has_roughness = r != null;
+            out.has_metallic = mt != null;
+        }
+        return out;
+    }
+
+    fn single(t: *Textures, i: u32, srgb: bool) !usize {
+        const key = (@as(u64, 1) << 62) | (@as(u64, @intFromBool(srgb)) << 61) | i;
+        if (t.by_key.get(key)) |x| return x;
+        const im = t.scene.images[i];
+        const bytes = try t.arena.alloc(u8, @as(usize, im.width) * im.height * 4);
+        for (0..im.height) |y| for (0..im.width) |x| {
+            // PNG rows run top to bottom; images are stored bottom up.
+            const src = im.pixels[(im.height - 1 - y) * im.width + x];
+            const dst = bytes[(y * im.width + x) * 4 ..][0..4];
+            for (0..3) |c| dst[c] = if (srgb) srgb8(src[c]) else unit8(src[c]);
+            dst[3] = unit8(src[3]);
+        };
+        return t.add(key, im.name, im.width, im.height, bytes);
+    }
+
+    fn combined(t: *Textures, rough: ?u32, metal: ?u32) !usize {
+        const key = (@as(u64, 2) << 62) | (@as(u64, rough orelse 0xFFFFFF) << 24) | (metal orelse 0xFFFFFF);
+        if (t.by_key.get(key)) |x| return x;
+        const ref = t.scene.images[(rough orelse metal).?];
+        const bytes = try t.arena.alloc(u8, @as(usize, ref.width) * ref.height * 4);
+        for (0..ref.height) |y| for (0..ref.width) |x| {
+            const k = (ref.height - 1 - y) * ref.width + x;
+            const dst = bytes[(y * ref.width + x) * 4 ..][0..4];
+            dst[0] = 255;
+            dst[1] = if (rough) |r| unit8(t.scene.images[r].pixels[k][0]) else 255;
+            dst[2] = if (metal) |mm| unit8(t.scene.images[mm].pixels[k][0]) else 255;
+            dst[3] = 255;
+        };
+        const name = try std.fmt.allocPrint(t.arena, "{s}_metallicRoughness", .{ref.name});
+        return t.add(key, name, ref.width, ref.height, bytes);
+    }
+
+    fn add(t: *Textures, key: u64, name: []const u8, w: u32, h: u32, rgba: []const u8) !usize {
+        var encoded: Writer.Allocating = .init(t.arena);
+        try png.encode(t.arena, .{ .width = w, .height = h, .channels = 4, .pixels = rgba }, .default, &encoded.writer);
+        const view = try t.bb.addView(encoded.written(), 0);
+        try t.images.append(t.arena, .{ .name = name, .view = view });
+        const idx = t.images.items.len - 1;
+        try t.by_key.put(t.arena, key, idx);
+        return idx;
+    }
+};
+
+fn unit8(x: f32) u8 {
+    return @intFromFloat(@round(std.math.clamp(x, 0, 1) * 255));
+}
+
+fn srgb8(x: f32) u8 {
+    const c = std.math.clamp(x, 0, 1);
+    const s = if (c <= 0.0031308) c * 12.92 else 1.055 * std.math.pow(f32, c, 1.0 / 2.4) - 0.055;
+    return @intFromFloat(@round(s * 255));
+}
+
+fn texRef(w: *Stringify, field: []const u8, index: usize) !void {
+    try w.objectField(field);
+    try w.beginObject();
+    try w.objectField("index");
+    try w.write(index);
+    try w.endObject();
+}
+
+fn writeMaterial(w: *Stringify, m: ir.Material, tex: MatTextures) !void {
     try w.beginObject();
     try w.objectField("name");
     try w.write(m.name);
     try w.objectField("pbrMetallicRoughness");
     try w.beginObject();
+    // glTF multiplies factor by texture, so a textured input's factor is 1.
     try w.objectField("baseColorFactor");
-    try f32Array(w, &.{ m.base_color[0], m.base_color[1], m.base_color[2], m.base_color[3] * m.alpha });
+    if (tex.base_color != null) {
+        try f32Array(w, &.{ 1, 1, 1, m.base_color[3] * m.alpha });
+    } else try f32Array(w, &.{ m.base_color[0], m.base_color[1], m.base_color[2], m.base_color[3] * m.alpha });
+    if (tex.base_color) |i| try texRef(w, "baseColorTexture", i);
     try w.objectField("metallicFactor");
-    try writeF32(w, m.metallic);
+    try writeF32(w, if (tex.has_metallic) 1 else m.metallic);
     try w.objectField("roughnessFactor");
-    try writeF32(w, m.roughness);
+    try writeF32(w, if (tex.has_roughness) 1 else m.roughness);
+    if (tex.metallic_roughness) |i| try texRef(w, "metallicRoughnessTexture", i);
     try w.endObject();
+    if (tex.normal) |i| try texRef(w, "normalTexture", i);
     if (m.emission_strength > 0) {
         try w.objectField("emissiveFactor");
-        try f32Array(w, &m.emission_color);
+        if (tex.emission != null) try f32Array(w, &.{ 1, 1, 1 }) else try f32Array(w, &m.emission_color);
+        if (tex.emission) |i| try texRef(w, "emissiveTexture", i);
     }
     if (m.base_color[3] * m.alpha < 1) {
         try w.objectField("alphaMode");

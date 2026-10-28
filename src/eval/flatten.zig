@@ -24,6 +24,7 @@ const Maps = struct {
     camera: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     light: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     material: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    image: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 };
 
 pub const Error = Allocator.Error || math.DeadlineError;
@@ -78,6 +79,7 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
     var cameras: std.ArrayList(ir.Camera) = .empty;
     var lights: std.ArrayList(ir.Light) = .empty;
     var materials: std.ArrayList(ir.Material) = .empty;
+    var images: std.ArrayList(ir.Image) = .empty;
     const nodes = try arena.alloc(ir.Node, order.items.len);
 
     for (order.items, 0..) |h, i| {
@@ -110,7 +112,7 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
                 const mats = m.materials.slice();
                 slots = try arena.alloc(?u32, mats.len);
                 for (mats, 0..) |mh, s| {
-                    slots[s] = if (mh) |x| if (db.get(.material, x)) |mat| try materialIndex(arena, &maps, &materials, x, mat) else null else null;
+                    slots[s] = if (mh) |x| if (db.get(.material, x)) |mat| try materialIndex(arena, db, &maps, &materials, &images, x, mat) else null else null;
                 }
             },
             .curve => if (db.get(.curve, d)) |cu| curve_blk: {
@@ -127,7 +129,7 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
                     const mats = cu.materials.slice();
                     slots = try arena.alloc(?u32, mats.len);
                     for (mats, 0..) |mh, s| {
-                        slots[s] = if (mh) |x| if (db.get(.material, x)) |mat| try materialIndex(arena, &maps, &materials, x, mat) else null else null;
+                        slots[s] = if (mh) |x| if (db.get(.material, x)) |mat| try materialIndex(arena, db, &maps, &materials, &images, x, mat) else null else null;
                     }
                 }
             },
@@ -158,6 +160,7 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
         .nodes = nodes,
         .meshes = meshes.items,
         .materials = materials.items,
+        .images = images.items,
         .cameras = cameras.items,
         .lights = lights.items,
         .world = world_data,
@@ -223,7 +226,7 @@ pub fn evaluateMesh(arena: Allocator, ctx: Context, m: *const types.Mesh) Error!
     };
 }
 
-fn materialIndex(arena: Allocator, maps: *Maps, list: *std.ArrayList(ir.Material), h: IdHandle, m: *const types.Material) Allocator.Error!u32 {
+fn materialIndex(arena: Allocator, db: *core.Database, maps: *Maps, list: *std.ArrayList(ir.Material), images: *std.ArrayList(ir.Image), h: IdHandle, m: *const types.Material) Allocator.Error!u32 {
     const gop = try maps.material.getOrPut(arena, h.index);
     if (gop.found_existing) return gop.value_ptr.*;
     gop.value_ptr.* = @intCast(list.items.len);
@@ -267,6 +270,31 @@ fn materialIndex(arena: Allocator, maps: *Maps, list: *std.ArrayList(ir.Material
             }
         }
         out.procedural = names;
+    }
+    // Baked or loaded images replace the textures they came from.
+    const out = &list.items[gop.value_ptr.*];
+    var still: std.ArrayList([]const u8) = .empty;
+    for (out.procedural) |name| {
+        const input = std.meta.stringToEnum(types.TextureInput, name).?;
+        if (input.imageOf(m) == null) try still.append(arena, name);
+    }
+    out.procedural = still.items;
+    inline for (std.meta.fields(types.TextureInput)) |f| {
+        const input: types.TextureInput = @enumFromInt(f.value);
+        if (input.imageOf(m)) |ih| if (db.get(.image, ih)) |im| {
+            const ig = try maps.image.getOrPut(arena, ih.index);
+            if (!ig.found_existing) {
+                ig.value_ptr.* = @intCast(images.items.len);
+                try images.append(arena, .{
+                    .name = try arena.dupe(u8, im.name.slice()),
+                    .width = @intCast(im.width),
+                    .height = @intCast(im.height),
+                    .pixels = im.pixels.slice(),
+                    .srgb = im.colorspace == .srgb,
+                });
+            }
+            @field(out, input.imageField()) = ig.value_ptr.*;
+        };
     }
     return gop.value_ptr.*;
 }

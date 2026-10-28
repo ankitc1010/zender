@@ -179,6 +179,28 @@ pub fn write(arena: Allocator, doc: *Document, w: *Stringify, opts: Options) Err
             try w.objectField("textures");
             try m.writeTextures(w);
         }
+        inline for (std.meta.fields(types.TextureInput)) |f| {
+            const input: types.TextureInput = @enumFromInt(f.value);
+            if (input.imageOf(m)) |ih| {
+                try w.objectField(input.imageField());
+                try writeRef(w, db, .image, ih);
+            }
+        }
+        try w.endObject();
+    }
+    try w.endArray();
+
+    try w.objectField("images");
+    try w.beginArray();
+    for (try sorted(arena, db, .image)) |h| {
+        const im = db.get(.image, h).?;
+        try w.beginObject();
+        try w.objectField("name");
+        try w.write(im.name.slice());
+        try w.objectField("properties");
+        try registry.writeStoredValues(types.Image, im, w);
+        try w.objectField("pixels_xxh64");
+        try writeHex(w, digest(im.pixels.slice()));
         try w.endObject();
     }
     try w.endArray();

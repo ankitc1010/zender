@@ -55,6 +55,19 @@ pub const tools = [_]Tool{
         .handler = assign,
     },
     .{
+        .name = "material.bake",
+        .title = "Bake textures",
+        .description = "Bake the procedural textures of a mesh object's materials to images through its UV map (run mesh.uv_unwrap first if it has none), so glTF export carries them as textures. Each textured input of each slot gets an image named <material>_<input>, size x size, linked as that input's image; normal bakes a tangent-space normal map. The bake uses the object's own mesh (before modifiers) and its UV layout, so a material shared with other objects fits this one. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Crown\",\"size\":1024}.",
+        .params = common.mutating(&.{
+            .{ .name = "object", .type = .{ .name_ref = .{} }, .doc = "Mesh object", .required = true },
+            .{ .name = "inputs", .type = .{ .string_list = .{ .max_items = 5 } }, .doc = "base_color, metallic, roughness, emission_color, normal; default: every textured one" },
+            .{ .name = "size", .type = .{ .integer = .{ .min = 8, .max = 8192 } }, .doc = "Image width and height (px)", .default = .{ .integer = 1024 } },
+            .{ .name = "margin", .type = .{ .integer = .{ .min = 0, .max = 64 } }, .doc = "Texels to extend past UV islands", .default = .{ .integer = 4 } },
+        }),
+        .kind = .mutating,
+        .handler = bake,
+    },
+    .{
         .name = "world.set",
         .title = "Set world",
         .description = "Set the background: a scene-linear RGB colour and a strength (1 = as is). Example: {\"scene_id\":\"scn_1a2b3c4d\",\"color\":[0.8,0.85,1],\"strength\":0.5}.",
@@ -133,6 +146,20 @@ fn writeMaterial(c: *Call, m: *const core.types.Material) HandlerError!void {
         try c.field("textures");
         try m.writeTextures(&c.out);
     }
+    var any = false;
+    inline for (std.meta.fields(core.types.TextureInput)) |f| {
+        const t: core.types.TextureInput = @enumFromInt(f.value);
+        if (t.imageOf(m)) |ih| if (c.doc().db.get(.image, ih)) |im| {
+            if (!any) {
+                try c.field("images");
+                try c.out.beginObject();
+                any = true;
+            }
+            try c.out.objectField(f.name);
+            try c.out.write(im.name.slice());
+        };
+    }
+    if (any) try c.out.endObject();
 }
 
 fn create(c: *Call) HandlerError!void {
@@ -187,6 +214,90 @@ fn assign(c: *Call) HandlerError!void {
     }
     const mat_name = if (mat) |m| doc.db.get(.material, m).?.name.slice() else "(none)";
     try c.say("Assigned '{s}' to slot {d} of {d} object(s).", .{ mat_name, slot, names.len });
+}
+
+fn bake(c: *Call) HandlerError!void {
+    const doc = c.doc();
+    const oh = try c.object("object");
+    const ob = doc.db.get(.object, oh).?;
+    if (ob.kind != .mesh) return c.failAt(.invalid_argument, "/object", "bake mesh objects; convert curves with curve.to_mesh", &.{}, "'{s}' is a {s}", .{ ob.name.slice(), @tagName(ob.kind) });
+    const mh = ob.data orelse return c.failAt(.stale_handle, "/object", "", &.{}, "'{s}' has no mesh", .{ob.name.slice()});
+    const mesh = doc.db.get(.mesh, mh).?;
+    var wanted = [_]bool{true} ** 5;
+    if (c.args.value("inputs")) |_| {
+        @memset(&wanted, false);
+        for (c.args.strings("inputs"), 0..) |s, i| {
+            const t = std.meta.stringToEnum(core.types.TextureInput, s.string) orelse
+                return c.failAt(.invalid_argument, try std.fmt.allocPrint(c.arena, "/inputs/{d}", .{i}), "", std.meta.fieldNames(core.types.TextureInput), "unknown input '{s}'", .{s.string});
+            wanted[@intFromEnum(t)] = true;
+        }
+    }
+    const size: u32 = @intCast(c.args.int("size").?);
+    const max_edge = c.server.config.budgets.max_render_edge;
+    if (size > max_edge) return c.failAt(.budget_exceeded, "/size", "ask the operator to raise --max-render-edge", &.{}, "size {d} exceeds the {d} px budget", .{ size, max_edge });
+    const margin: u32 = @intCast(c.args.int("margin").?);
+    if (ob.modifiers.len() > 0) try c.warn("'{s}' has modifiers; the bake uses its mesh before them", .{ob.name.slice()});
+
+    var baked: usize = 0;
+    try c.field("images");
+    try c.out.beginArray();
+    for (mesh.materials.slice(), 0..) |slot_mat, slot| {
+        const mat_h = slot_mat orelse continue;
+        const mat = doc.db.get(.material, mat_h) orelse continue;
+        // Snapshot the recipes: creating images may move the material pool.
+        const textures = try c.arena.dupe(core.types.MaterialTexture, mat.textures.slice());
+        const mat_name = try c.arena.dupe(u8, mat.name.slice());
+        for (textures) |*t| {
+            if (!wanted[@intFromEnum(t.input)]) continue;
+            const res = engine.geom.bake.bake(doc.gpa, mesh, &t.recipe, t.input, .{
+                .width = size,
+                .height = size,
+                .margin = margin,
+                .slot = @intCast(slot),
+                .background = if (t.input == .normal) .{ 0.5, 0.5, 1, 1 } else .{ 0, 0, 0, 1 },
+            }) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NoUvMap => return c.failAt(.invalid_operation, "/object", "give it a UV map with mesh.uv_unwrap", &.{}, "'{s}' has no UV map to bake through", .{ob.name.slice()}),
+                error.NoFaces => return c.failAt(.invalid_operation, "/object", "", &.{}, "'{s}' has no faces", .{ob.name.slice()}),
+            };
+            if (res.covered == 0) {
+                doc.gpa.free(res.pixels);
+                try c.warn("no faces of slot {d} ('{s}') reach the UV square; {s} not baked", .{ slot, mat_name, @tagName(t.input) });
+                continue;
+            }
+            const name = try std.fmt.allocPrint(c.arena, "{s}_{s}", .{ mat_name, @tagName(t.input) });
+            var image: core.types.Image = .{
+                .width = @intCast(size),
+                .height = @intCast(size),
+                .colorspace = if (t.input == .base_color or t.input == .emission_color) .srgb else .non_color,
+            };
+            image.pixels = core.Shared([4]f32).fromOwned(doc.gpa, res.pixels) catch |e| {
+                doc.gpa.free(res.pixels);
+                return e;
+            };
+            const ih = doc.db.create(.image, name, image) catch |e| {
+                image.releaseRefs(doc.gpa);
+                return e;
+            };
+            t.input.setImage(doc.db.get(.material, mat_h).?, ih);
+            try c.markCreated(ih, doc.db.get(.image, ih).?.name.slice());
+            try c.out.beginObject();
+            try c.out.objectField("image");
+            try c.out.write(doc.db.get(.image, ih).?.name.slice());
+            try c.out.objectField("material");
+            try c.out.write(mat_name);
+            try c.out.objectField("input");
+            try c.out.write(@tagName(t.input));
+            try c.out.objectField("coverage");
+            try c.out.write(@as(f64, @floatFromInt(res.covered)) / @as(f64, @floatFromInt(@as(u64, size) * size)));
+            try c.out.endObject();
+            baked += 1;
+        }
+        try c.markChanged(mat_h, mat_name);
+    }
+    try c.out.endArray();
+    if (baked == 0) return c.failAt(.invalid_operation, "/object", "give a material on this object a texture recipe first (material.update)", &.{}, "nothing to bake on '{s}'", .{ob.name.slice()});
+    try c.say("Baked {d} image(s) of {d} x {d} px for '{s}'.", .{ baked, size, size, ob.name.slice() });
 }
 
 fn worldSet(c: *Call) HandlerError!void {

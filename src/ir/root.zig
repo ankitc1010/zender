@@ -17,6 +17,7 @@ pub const Scene = struct {
     nodes: []const Node,
     meshes: []const Mesh,
     materials: []const Material,
+    images: []const Image = &.{},
     cameras: []const Camera,
     lights: []const Light,
     world: World,
@@ -109,6 +110,23 @@ pub const Material = struct {
     /// Inputs driven by a procedural texture, by name; their values above
     /// are the texture's mean until something evaluates it per point.
     procedural: []const []const u8 = &.{},
+    /// Images driving inputs (indices into Scene.images). Where set, the
+    /// matching value above is the image's mean, for previews.
+    base_color_image: ?u32 = null,
+    metallic_image: ?u32 = null,
+    roughness_image: ?u32 = null,
+    normal_image: ?u32 = null,
+    emission_image: ?u32 = null,
+};
+
+/// RGBA floats, bottom row first; sRGB images hold colours (scene-linear
+/// values, encoded with the sRGB curve when written).
+pub const Image = struct {
+    name: []const u8,
+    width: u32,
+    height: u32,
+    pixels: []const [4]f32,
+    srgb: bool,
 };
 
 pub const Projection = enum { perspective, orthographic };

@@ -778,7 +778,7 @@ test "procedural textures on materials, displacement and relief" {
     const camo = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Camo\",\"properties\":{{\"roughness\":0.85,\"base_color\":{{\"texture\":\"noise\",\"scale\":2.6,\"detail\":2,\"roughness\":0.55,\"distortion\":0.6,\"ramp\":{{\"mode\":\"constant\",\"stops\":[[0,[0.02,0.03,0.01]],[0.45,[0.1,0.06,0.02]],[0.64,[0.19,0.035,0.026]]]}}}},\"normal\":{{\"bump\":{{\"texture\":\"wave\",\"wave_type\":\"rings\",\"direction\":\"spherical\",\"distortion\":6}},\"strength\":0.5}}}}}}", .{id}));
     const tex = camo.object.get("textures").?.object;
     try testing.expectEqualStrings("constant", tex.get("base_color").?.object.get("ramp").?.object.get("mode").?.string);
-    try testing.expect(tex.get("normal").?.object.get("strength").?.float == 0.5);
+    try testing.expect(schemaNumber(tex.get("normal").?.object.get("strength").?) == 0.5);
     const typo = try f.call("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"properties\":{{\"base_color\":{{\"texture\":\"noise\",\"scal\":2}}}}}}", .{id}));
     try testing.expectEqualStrings("/properties/base_color/scal", typo.tool_error.path);
     // A plain value replaces the texture.
@@ -803,4 +803,38 @@ test "procedural textures on materials, displacement and relief" {
     const bad_disp = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"steps\":[{{\"shape\":{{\"type\":\"sphere\",\"radius\":0.5}},\"displace\":{{\"amount\":0.1}}}}]}}", .{id}));
     try testing.expectEqualStrings("/steps/0/displace/texture", bad_disp.tool_error.path);
     _ = try f.ok("mesh.revolve", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Bark\",\"profile\":[[0,0.3],[2,0.25]],\"segments\":48,\"relief_depth\":0.05,\"relief_texture\":{{\"texture\":\"wave\",\"direction\":\"z\",\"scale\":4}}}}", .{id}));
+}
+
+test "material.bake turns recipes into images that glTF carries as textures" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Camo\",\"properties\":{{\"base_color\":{{\"texture\":\"noise\",\"scale\":2.6,\"ramp\":{{\"mode\":\"constant\",\"stops\":[[0,[0.02,0.03,0.01]],[0.5,[0.19,0.035,0.026]]]}}}},\"roughness\":{{\"texture\":\"voronoi\",\"scale\":4}},\"normal\":{{\"bump\":{{\"texture\":\"wave\",\"scale\":3}},\"strength\":0.4}}}}}}", .{id}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cylinder\",\"name\":\"Band\",\"material\":\"Camo\"}}", .{id}));
+    // An SDF mesh has no UVs yet.
+    _ = try f.ok("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Blob\",\"voxel_size\":0.1,\"steps\":[{{\"shape\":{{\"type\":\"sphere\",\"radius\":0.5}}}}]}}", .{id}));
+    _ = try f.ok("material.assign", try f.fmt("{{\"scene_id\":\"{s}\",\"objects\":[\"Blob\"],\"material\":\"Camo\"}}", .{id}));
+    const no_uv = try f.call("material.bake", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Blob\",\"size\":32}}", .{id}));
+    try testing.expectEqualStrings("/object", no_uv.tool_error.path);
+
+    const baked = try f.ok("material.bake", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Band\",\"size\":64}}", .{id}));
+    const images = baked.object.get("images").?.array.items;
+    try testing.expectEqual(@as(usize, 3), images.len);
+    try testing.expectEqualStrings("Camo_base_color", images[0].object.get("image").?.string);
+    try testing.expect(schemaNumber(images[0].object.get("coverage").?) > 0.3);
+    const mat = try f.ok("material.update", try f.fmt("{{\"scene_id\":\"{s}\",\"material\":\"Camo\",\"properties\":{{}}}}", .{id}));
+    try testing.expectEqualStrings("Camo_normal", mat.object.get("images").?.object.get("normal").?.string);
+
+    _ = try f.ok("object.delete", try f.fmt("{{\"scene_id\":\"{s}\",\"objects\":[\"Blob\"]}}", .{id}));
+    const out = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"band.gltf\"}}", .{id}));
+    // Baked inputs no longer count as procedural.
+    try testing.expectEqual(@as(usize, 0), out.object.get("dropped").?.array.items.len);
+    const text = try f.tmp.dir.readFileAlloc(testing.io, "band.gltf", f.arena_state.allocator(), .limited(1 << 24));
+    const gltf = try std.json.parseFromSliceLeaky(Value, f.arena_state.allocator(), text, .{});
+    try testing.expectEqual(@as(usize, 3), gltf.object.get("textures").?.array.items.len);
+    const pbr = gltf.object.get("materials").?.array.items[0].object.get("pbrMetallicRoughness").?.object;
+    try testing.expect(pbr.get("baseColorTexture") != null and pbr.get("metallicRoughnessTexture") != null);
+    try testing.expectEqual(@as(f64, 1), schemaNumber(pbr.get("roughnessFactor").?));
+    try testing.expect(gltf.object.get("materials").?.array.items[0].object.get("normalTexture") != null);
 }
