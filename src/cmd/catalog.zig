@@ -4,6 +4,7 @@ const server = @import("server.zig");
 
 pub const tools: []const server.Tool = &(@import("tools/scene.zig").tools ++
     @import("tools/object.zig").tools ++
+    @import("tools/create.zig").tools ++
     @import("tools/mesh.zig").tools ++
     @import("tools/modifier.zig").tools ++
     @import("tools/collection.zig").tools ++

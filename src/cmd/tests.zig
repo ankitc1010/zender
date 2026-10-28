@@ -687,3 +687,33 @@ test "coat, sheen and per-face material slots reach glTF" {
     for (meshes) |m| prims += m.object.get("primitives").?.array.items.len;
     try testing.expectEqual(@as(usize, 3), prims);
 }
+
+test "mesh.from_data and mesh.revolve build objects and reject bad input" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    const wedge = try f.ok("mesh.from_data", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Wedge\",\"vertices\":[[0,0,0],[1,0,0],[0,1,0],[0,0,1]],\"faces\":[[0,2,1],[0,1,3],[1,2,3],[0,3,2]],\"material_index\":[0,1,1,0],\"location\":[2,0,0]}}", .{id}));
+    try testing.expectEqualStrings("Wedge", wedge.object.get("object").?.object.get("name").?.string);
+    const slot1 = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Wedge\",\"selector\":{{\"where\":\"material_index == 1\"}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 2), slot1.object.get("count").?.integer);
+
+    const bad_index = try f.call("mesh.from_data", try f.fmt("{{\"scene_id\":\"{s}\",\"vertices\":[[0,0,0],[1,0,0],[0,1,0]],\"faces\":[[0,1,3]]}}", .{id}));
+    try testing.expectEqualStrings("/faces/0/2", bad_index.tool_error.path);
+    const repeated = try f.call("mesh.from_data", try f.fmt("{{\"scene_id\":\"{s}\",\"vertices\":[[0,0,0],[1,0,0],[0,1,0]],\"faces\":[[0,1,0]]}}", .{id}));
+    try testing.expectEqualStrings("/faces/0", repeated.tool_error.path);
+    const short_uvs = try f.call("mesh.from_data", try f.fmt("{{\"scene_id\":\"{s}\",\"vertices\":[[0,0,0],[1,0,0],[0,1,0]],\"faces\":[[0,1,2]],\"uvs\":[[0,0],[1,0]]}}", .{id}));
+    try testing.expectEqualStrings("/uvs", short_uvs.tool_error.path);
+    const not_int = try f.call("mesh.from_data", try f.fmt("{{\"scene_id\":\"{s}\",\"vertices\":[[0,0,0],[1,0,0],[0,1,0]],\"faces\":[[0,1,2.5]]}}", .{id}));
+    try testing.expectEqualStrings("/faces/0/2", not_int.tool_error.path);
+
+    // A capped can: 2 rings of 16, 16 sides + 2 caps.
+    _ = try f.ok("mesh.revolve", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Can\",\"profile\":[[0,0.5],[1,0.5]],\"segments\":16,\"cap_start\":true,\"cap_end\":true}}", .{id}));
+    const can = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Can\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 18), can.object.get("count").?.integer);
+    // Fluted half shell, tilted; too few segments per strip warns.
+    const shell = try f.ok("mesh.revolve", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Guard\",\"profile\":[[0,0.9],[1,1.0]],\"angle_end\":180,\"segments\":20,\"relief_count\":22,\"relief_depth\":0.035,\"relief_groove\":0.012,\"rotation\":[0,20,0]}}", .{id}));
+    try testing.expectEqual(@as(usize, 1), shell.object.get("warnings").?.array.items.len);
+    const inner_pole = try f.call("mesh.revolve", try f.fmt("{{\"scene_id\":\"{s}\",\"profile\":[[0,1],[1,0],[2,1]]}}", .{id}));
+    try testing.expectEqualStrings("/profile/1/1", inner_pole.tool_error.path);
+}

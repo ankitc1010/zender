@@ -44,39 +44,39 @@ pub const limits = struct {
 
 pub const Error = build.BuildError || error{InvalidParameter};
 
-const Builder = struct {
+pub const Builder = struct {
     gpa: Allocator,
     pos: std.ArrayList(Vec3) = .empty,
     offsets: std.ArrayList(u32) = .empty,
     corners: std.ArrayList(u32) = .empty,
     uvs: std.ArrayList([2]f32) = .empty,
 
-    fn init(gpa: Allocator) Allocator.Error!Builder {
+    pub fn init(gpa: Allocator) Allocator.Error!Builder {
         var b: Builder = .{ .gpa = gpa };
         try b.offsets.append(gpa, 0);
         return b;
     }
 
-    fn deinit(b: *Builder) void {
+    pub fn deinit(b: *Builder) void {
         b.pos.deinit(b.gpa);
         b.offsets.deinit(b.gpa);
         b.corners.deinit(b.gpa);
         b.uvs.deinit(b.gpa);
     }
 
-    fn vert(b: *Builder, p: Vec3) Allocator.Error!u32 {
+    pub fn vert(b: *Builder, p: Vec3) Allocator.Error!u32 {
         try b.pos.append(b.gpa, p);
         return @intCast(b.pos.items.len - 1);
     }
 
-    fn face(b: *Builder, verts: []const u32, uvs: []const [2]f32) Allocator.Error!void {
+    pub fn face(b: *Builder, verts: []const u32, uvs: []const [2]f32) Allocator.Error!void {
         std.debug.assert(verts.len == uvs.len);
         try b.corners.appendSlice(b.gpa, verts);
         try b.uvs.appendSlice(b.gpa, uvs);
         try b.offsets.append(b.gpa, @intCast(b.corners.items.len));
     }
 
-    fn finish(b: *Builder, smooth: bool) Error!Mesh {
+    pub fn finish(b: *Builder, smooth: bool) Error!Mesh {
         const n_faces = b.offsets.items.len - 1;
         const sharp = try b.gpa.alloc(bool, n_faces);
         defer b.gpa.free(sharp);

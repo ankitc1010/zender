@@ -45,6 +45,11 @@ pub const Type = union(enum) {
     string_list: struct { max_items: usize = 4096 },
     /// A path of [x, y, z] points (metres).
     points: struct { max_items: usize = 1024 },
+    /// A list of number tuples, [[a, b], ...]: `width` numbers each, or at
+    /// least 3 when width is 0 (polygons as vertex indices).
+    tuples: struct { width: u8 = 0, integer: bool = false, min: ?f64 = null, max_items: usize = 4096 },
+    /// A flat list of numbers.
+    numbers: struct { integer: bool = false, min: ?f64 = null, max_items: usize = 4096 },
     /// Datablock name, or null where `nullable`.
     name_ref: struct { nullable: bool = false },
     /// Free-form object whose schema comes from the property registry;
@@ -217,6 +222,39 @@ fn writeParamSchema(p: Param, w: *Stringify) Stringify.Error!void {
             try w.write(1);
             try w.objectField("maxItems");
             try w.write(s.max_items);
+        },
+        .tuples => |t| {
+            try w.objectField("type");
+            try w.write("array");
+            try w.objectField("items");
+            try w.beginObject();
+            try w.objectField("type");
+            try w.write("array");
+            try w.objectField("items");
+            try w.beginObject();
+            try w.objectField("type");
+            try w.write(if (t.integer) "integer" else "number");
+            try w.endObject();
+            try w.objectField("minItems");
+            try w.write(if (t.width == 0) 3 else t.width);
+            if (t.width > 0) {
+                try w.objectField("maxItems");
+                try w.write(t.width);
+            }
+            try w.endObject();
+            try w.objectField("maxItems");
+            try w.write(t.max_items);
+        },
+        .numbers => |t| {
+            try w.objectField("type");
+            try w.write("array");
+            try w.objectField("items");
+            try w.beginObject();
+            try w.objectField("type");
+            try w.write(if (t.integer) "integer" else "number");
+            try w.endObject();
+            try w.objectField("maxItems");
+            try w.write(t.max_items);
         },
         .name_ref => |r| {
             // anyOf rather than a type array: clients that map schemas onto
@@ -402,6 +440,28 @@ fn fail(arena: Allocator, failure: *Failure, p: Param, sub: []const u8, comptime
     return null;
 }
 
+/// Fills `failure` and returns true when `x` is not a finite number (a
+/// whole one when `integer`) of at least `min`.
+fn badNumber(arena: Allocator, failure: *Failure, p: Param, x: Value, integer: bool, min: ?f64, sub: []const u8) Allocator.Error!bool {
+    const f = number(x) orelse {
+        _ = try fail(arena, failure, p, sub, "'{s}' must contain numbers", .{p.name});
+        return true;
+    };
+    if (!std.math.isFinite(f) or @abs(f) > 1e9) {
+        _ = try fail(arena, failure, p, sub, "'{s}' values must be finite, within 1e9", .{p.name});
+        return true;
+    }
+    if (integer and f != @floor(f)) {
+        _ = try fail(arena, failure, p, sub, "'{s}' must contain whole numbers", .{p.name});
+        return true;
+    }
+    if (min) |lo| if (f < lo) {
+        _ = try fail(arena, failure, p, sub, "'{s}' values must be at least {d}", .{ p.name, lo });
+        return true;
+    };
+    return false;
+}
+
 fn check(arena: Allocator, p: Param, val: Value, failure: *Failure) Allocator.Error!?Value {
     switch (p.type) {
         .number => |n| {
@@ -493,6 +553,26 @@ fn check(arena: Allocator, p: Param, val: Value, failure: *Failure) Allocator.Er
                     if (!std.math.isFinite(f) or @abs(f) > 1e9) return fail(arena, failure, p, try std.fmt.allocPrint(arena, "/{d}/{d}", .{ i, k }), "'{s}' coordinates must be finite, within 1e9", .{p.name});
                 }
             }
+            return val;
+        },
+        .tuples => |t| {
+            const arr = if (val == .array) val.array.items else return fail(arena, failure, p, "", "'{s}' must be a list of number lists", .{p.name});
+            if (arr.len == 0 or arr.len > t.max_items) return fail(arena, failure, p, "", "'{s}' needs 1 to {d} items", .{ p.name, t.max_items });
+            for (arr, 0..) |item, i| {
+                const tup = if (item == .array) item.array.items else &[_]Value{};
+                const ok_len = if (t.width == 0) tup.len >= 3 else tup.len == t.width;
+                if (!ok_len) {
+                    const want = if (t.width == 0) "at least 3" else try std.fmt.allocPrint(arena, "{d}", .{t.width});
+                    return fail(arena, failure, p, try std.fmt.allocPrint(arena, "/{d}", .{i}), "'{s}' items must have {s} numbers", .{ p.name, want });
+                }
+                for (tup, 0..) |x, k| if (try badNumber(arena, failure, p, x, t.integer, t.min, try std.fmt.allocPrint(arena, "/{d}/{d}", .{ i, k }))) return null;
+            }
+            return val;
+        },
+        .numbers => |t| {
+            const arr = if (val == .array) val.array.items else return fail(arena, failure, p, "", "'{s}' must be a list of numbers", .{p.name});
+            if (arr.len > t.max_items) return fail(arena, failure, p, "", "'{s}' has more than {d} items", .{ p.name, t.max_items });
+            for (arr, 0..) |x, i| if (try badNumber(arena, failure, p, x, t.integer, t.min, try std.fmt.allocPrint(arena, "/{d}", .{i}))) return null;
             return val;
         },
         .name_ref => |r| return switch (val) {
