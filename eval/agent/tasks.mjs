@@ -1,8 +1,9 @@
-// The G1 agent-evaluation task set (TRD §15): 100 tasks across the tool
-// surface, each a request in plain words, machine checks on the scene the
-// agent exports, and a reference solution (a command log) that proves the
-// checks can pass. Names in prompts are fixed so checks can find objects;
-// sizes and placements vary between variants.
+// The agent-evaluation task sets: G1 (TRD §15), 100 tasks across the tool
+// surface, and P1.5's 15 (G1.5: blended shapes, tubes, rope rims, textures).
+// Each is a request in plain words, machine checks on the scene the agent
+// exports, and a reference solution (a command log) that proves the checks
+// can pass. Names in prompts are fixed so checks can find objects; sizes
+// and placements vary between variants.
 
 const op = (tool, params) => ({ tool, params });
 const prim = (kind, name, extra = {}) => op('object.add_primitive', { kind, name, ...extra });
@@ -465,15 +466,154 @@ const templates = [
   },
 ];
 
-/// The 100 tasks, numbered in order; variants cycle when a template has
-/// fewer than its share.
-export function tasks() {
-  const base = templates.flatMap((t) => t.variants.map((v) => ({ category: t.category, ...t.make(v) })));
+// ---- P1.5: one task per variant ----
+const ring = (r, z, a0, a1, n) => Array.from({ length: n + 1 }, (_, j) => {
+  const a = ((a0 + ((a1 - a0) * j) / n) * Math.PI) / 180;
+  return [+(r * Math.cos(a)).toFixed(5), +(r * Math.sin(a)).toFixed(5), z];
+});
+
+const p15Templates = [
+  {
+    category: 'blend',
+    variants: [[0.5, 0.7, 0.2], [0.3, 0.4, 0.16], [0.8, 1, 0.3]],
+    make: ([r, d, k]) => {
+      // Waist half-height at x = 0: a plain union's, and with the blend's
+      // k / 4 bulge; the rays want at least halfway between.
+      const hu = Math.sqrt(r * r - (d / 2) ** 2), hb = Math.sqrt((r + k / 4) ** 2 - (d / 2) ** 2), mid = (hu + hb) / 2;
+      return {
+        prompt: `Model a peanut named Peanut: two spheres of radius ${r} m whose centres are ${d} m apart along X, centred on the origin in X and Y and resting on the ground, joined by a smooth blend of about ${k} m so the waist between them is filled in instead of creased.`,
+        checks: [
+          { kind: 'size', name: 'Peanut', size: [d + 2 * r, 2 * r, 2 * r], tol: 0.02 + 0.04 * r },
+          { kind: 'bound', name: 'Peanut', axis: 'z', side: 'min', eq: 0, tol: 0.03 },
+          { kind: 'ray', name: 'Peanut', from: [0, 0, 10], dir: [0, 0, -1], axis: 'z', gt: r + mid },
+          { kind: 'ray', name: 'Peanut', from: [0, 0, -10], dir: [0, 0, 1], axis: 'z', lt: r - mid },
+        ],
+        solution: [op('mesh.from_sdf', { name: 'Peanut', voxel_size: r / 25, steps: [{ shape: { type: 'sphere', radius: r, location: [-d / 2, 0, r] } }, { blend: k, shape: { type: 'sphere', radius: r, location: [d / 2, 0, r] } }] })],
+      };
+    },
+  },
+  {
+    category: 'blend',
+    variants: [[0.4, 0.25, 0.12, 0.03, 0.02], [0.6, 0.35, 0.15, 0.04, 0.03]],
+    make: ([x, y, z, r, dent]) => {
+      const rho = 4 * dent + y / 4;
+      return {
+        prompt: `Model a bar of soap named Soap: a box ${x} m long (X), ${y} m deep (Y) and ${z} m tall (Z) with every edge rounded to a radius of about ${r} m, lying on the ground centred at the origin, with a smooth dent about ${dent} m deep pressed into the middle of its top.`,
+        checks: [
+          { kind: 'size', name: 'Soap', size: [x, y, z], tol: 0.015 },
+          { kind: 'bound', name: 'Soap', axis: 'z', side: 'min', eq: 0, tol: 0.01 },
+          { kind: 'ray', name: 'Soap', from: [0, 0, 10], dir: [0, 0, -1], axis: 'z', lt: z - dent / 2, gt: z - 2 * dent },
+          // A tenth of the radius in from an edge, a round edge has fallen 0.56 r.
+          { kind: 'ray', name: 'Soap', from: [x / 2 - r / 10, 0, 10], dir: [0, 0, -1], axis: 'z', lt: z - r / 4 },
+          { kind: 'ray', name: 'Soap', from: [x / 2 - r / 10, 10, z / 2], dir: [0, -1, 0], axis: 'y', lt: y / 2 - r / 4 },
+        ],
+        solution: [op('mesh.from_sdf', { name: 'Soap', voxel_size: r / 6, steps: [{ shape: { type: 'box', size: [x, y, z], round: r, location: [0, 0, z / 2] } }, { op: 'subtract', blend: dent / 2, shape: { type: 'sphere', radius: rho, location: [0, 0, z + rho - dent] } }] })],
+      };
+    },
+  },
+  {
+    category: 'tube',
+    variants: [[0.1, [[0, 0, 0.1], [2, 0, 0.1], [2, 0, 1.5]]], [0.05, [[0, 0, 0.5], [1, 1, 0.5], [1, 2, 1.5], [0, 3, 1.5]]], [0.15, [[-1, 0, 0.15], [1, 0, 0.15], [1, 0, 1], [-1, 0, 1]]]],
+    make: ([r, pts]) => {
+      // Bounds as round ends give them; flat caps fall short by at most r.
+      const lo = [0, 1, 2].map((k) => Math.min(...pts.map((p) => p[k])) - r);
+      const hi = [0, 1, 2].map((k) => Math.max(...pts.map((p) => p[k])) + r);
+      return {
+        prompt: `Run a pipe named Pipe, a round tube of radius ${r} m, through the points ${pts.map((p) => `[${p}]`).join(', ')} in that order with straight runs between them, and close both ends.`,
+        checks: [
+          { kind: 'size', name: 'Pipe', size: hi.map((h, k) => h - lo[k]), tol: r + 0.02 },
+          { kind: 'center', name: 'Pipe', at: hi.map((h, k) => (h + lo[k]) / 2), tol: r / 2 + 0.02 },
+          { kind: 'passes', name: 'Pipe', points: pts, radius: r, tol: 0.02 + r / 2 },
+          { kind: 'closed', name: 'Pipe' },
+        ],
+        solution: [op('curve.add', { name: 'Pipe', bevel_depth: r, fill_caps: true, splines: [{ points: pts }] })],
+      };
+    },
+  },
+  {
+    category: 'tube',
+    variants: [['full', 1, 0.6, 0.05], ['half', 0.8, 0.75, 0.04]],
+    make: ([kind, R, H, r]) => kind === 'full'
+      ? {
+        prompt: `Model a drum named Drum: a cylinder of radius ${R} m and height ${H} m standing on the ground at the origin, with a rope named Rope, a round tube of radius ${r} m, running all the way around its top rim, centred on the rim edge.`,
+        checks: [
+          { kind: 'size', name: 'Drum', size: [2 * R, 2 * R, H], tol: 0.05 },
+          { kind: 'size', name: 'Rope', size: [2 * (R + r), 2 * (R + r), 2 * r], tol: 0.03 },
+          { kind: 'center', name: 'Rope', at: [0, 0, H], tol: 0.03 },
+          { kind: 'passes', name: 'Rope', points: ring(R, H, 0, 360, 4).slice(0, 4), radius: r, tol: 0.03 },
+        ],
+        solution: [prim('cylinder', 'Drum', { radius: R, depth: H, location: [0, 0, H / 2] }), op('curve.add', { name: 'Rope', bevel_depth: r, splines: [{ points: ring(R, H, 0, 360, 48) }] })],
+      }
+      : {
+        prompt: `Model a round table top named Top: a cylinder of radius ${R} m, 0.05 m thick, centred on the Z axis with its top face at z = ${H} m. Lay a rope named Rope, a round tube of radius ${r} m, along the half of its top rim edge that faces -Y, from the +X side round to the -X side.`,
+        checks: [
+          { kind: 'size', name: 'Top', size: [2 * R, 2 * R, 0.05], tol: 0.03 },
+          { kind: 'bound', name: 'Top', axis: 'z', side: 'max', eq: H, tol: 0.01 },
+          { kind: 'size', name: 'Rope', size: [2 * (R + r), R + 2 * r, 2 * r], tol: r + 0.02 },
+          { kind: 'center', name: 'Rope', at: [0, -R / 2, H], tol: r / 2 + 0.02 },
+          { kind: 'passes', name: 'Rope', points: ring(R, H, 0, -180, 4), radius: r, tol: 0.03 },
+        ],
+        solution: [prim('cylinder', 'Top', { radius: R, depth: 0.05, location: [0, 0, H - 0.025] }), op('curve.add', { name: 'Rope', bevel_depth: r, fill_caps: true, splines: [{ points: ring(R, H, 0, -180, 24) }] })],
+      },
+  },
+  {
+    category: 'texture',
+    variants: [['camo'], ['stripes'], ['spots']],
+    make: ([kind]) => ({
+      camo: {
+        prompt: 'Make a camouflage material named Camo: a noise texture on the base colour, mapped through a colour ramp with constant (hard-edged) steps between at least three colours (dark green, brown and khaki), and put it on a cube named Crate.',
+        checks: [{ kind: 'texture', name: 'Crate', texture: 'noise', ramp_mode: 'constant', min_stops: 3 }, { kind: 'material', name: 'Crate', material: 'Camo' }],
+        solution: [op('material.create', { name: 'Camo', properties: { roughness: 0.85, base_color: { texture: 'noise', scale: 2.6, distortion: 0.6, ramp: { mode: 'constant', stops: [[0, [0.04, 0.08, 0.02]], [0.45, [0.12, 0.06, 0.02]], [0.64, [0.42, 0.37, 0.22]]] } } } }), prim('cube', 'Crate', { material: 'Camo' })],
+      },
+      stripes: {
+        prompt: 'Make a material named Stripes whose base colour is a wave texture of bands, mapped through a colour ramp from black to white, and put it on a UV sphere named Ball.',
+        checks: [{ kind: 'texture', name: 'Ball', texture: 'wave', min_stops: 2 }, { kind: 'material', name: 'Ball', material: 'Stripes' }],
+        solution: [op('material.create', { name: 'Stripes', properties: { base_color: { texture: 'wave', wave_type: 'bands', scale: 3, ramp: { mode: 'linear', stops: [[0, [0, 0, 0]], [1, [1, 1, 1]]] } } } }), prim('uv_sphere', 'Ball', { material: 'Stripes' })],
+      },
+      spots: {
+        prompt: 'Make a giraffe-spot material named Spots, a Voronoi texture driving the base colour, put it on a cube named Box, then bake that texture to a 256 x 256 px image so a glTF export can carry it.',
+        checks: [{ kind: 'texture', name: 'Box', texture: 'voronoi', baked: true, size: 256 }, { kind: 'material', name: 'Box', material: 'Spots' }],
+        solution: [op('material.create', { name: 'Spots', properties: { base_color: { texture: 'voronoi', scale: 5, ramp: { mode: 'constant', stops: [[0, [0.35, 0.18, 0.05]], [0.3, [0.8, 0.6, 0.3]]] } } } }), prim('cube', 'Box', { material: 'Spots' }), op('material.bake', { object: 'Box', size: 256 })],
+      },
+    })[kind],
+  },
+  {
+    category: 'slots',
+    variants: [[]],
+    make: () => ({
+      prompt: 'Model a crown band named Band: one cylinder mesh of radius 0.5 m and height 0.4 m standing on the ground at the origin, gold on every face of its top half (above z = 0.2) and red on every face of its bottom half; cut it at mid-height first so no face spans both halves.',
+      checks: [{ kind: 'size', name: 'Band', size: [1, 1, 0.4], tol: 0.03 }, { kind: 'face_material', name: 'Band', axis: 'z', at: 0.2, above: [1, 0.77, 0.34], below: [0.8, 0.05, 0.05], tol: 0.3 }],
+      solution: [mat('Gold', [1, 0.766, 0.336], { metallic: 1 }), mat('Red', [0.8, 0.05, 0.05]), prim('cylinder', 'Band', { radius: 0.5, depth: 0.4, location: [0, 0, 0.2], material: 'Red' }), op('mesh.loop_cut', { object: 'Band', selector: { domain: 'edge', direction: [0, 0, 1], within: 5 }, cuts: 1 }), op('material.assign', { objects: ['Band'], material: 'Gold', slot: 1, selector: { where: 'z > 0.2' } })],
+    }),
+  },
+  {
+    category: 'revolve',
+    variants: [[]],
+    make: () => ({
+      prompt: 'Model a vase named Vase as a surface of revolution around the Z axis, standing on the ground at the origin: radius 0.1 m at the base (z = 0), widening to 0.18 m at z = 0.15, narrowing to a 0.06 m neck at z = 0.35 and flaring to 0.09 m at the lip at z = 0.42. Close the bottom.',
+      checks: [
+        { kind: 'size', name: 'Vase', size: [0.36, 0.36, 0.42], tol: 0.02 },
+        { kind: 'bound', name: 'Vase', axis: 'z', side: 'min', eq: 0, tol: 0.01 },
+        { kind: 'ray', name: 'Vase', from: [10, 0, 0.15], dir: [-1, 0, 0], axis: 'x', gt: 0.16, lt: 0.195 },
+        { kind: 'ray', name: 'Vase', from: [10, 0, 0.35], dir: [-1, 0, 0], axis: 'x', gt: 0.045, lt: 0.08 },
+        { kind: 'ray', name: 'Vase', from: [0, 0, -10], dir: [0, 0, 1], axis: 'z', lt: 0.02 },
+      ],
+      solution: [op('mesh.revolve', { name: 'Vase', profile: [[0, 0], [0, 0.1], [0.15, 0.18], [0.35, 0.06], [0.42, 0.09]], segments: 64 })],
+    }),
+  },
+];
+
+/// A task set: g1 (100 tasks t001…, variants cycling when a template has
+/// fewer than its share), p15 (one per variant, p001…) or all.
+export function tasks(set = 'g1') {
+  if (set === 'all') return [...tasks('g1'), ...tasks('p15')];
+  const withScene = (t, id) => ({ id, ...t, solution: [op('scene.create', { name: 'Eval' }), ...t.solution] });
+  const expand = (ts) => ts.flatMap((t) => t.variants.map((v) => ({ category: t.category, ...t.make(v) })));
+  if (set === 'p15') return expand(p15Templates).map((t, i) => withScene(t, `p${String(i + 1).padStart(3, '0')}`));
+  if (set !== 'g1') throw new Error(`unknown task set ${set} (g1, p15 or all)`);
+  const base = expand(templates);
   const out = [];
-  for (let i = 0; out.length < 100; i++) {
-    const t = base[i % base.length];
-    out.push({ id: `t${String(out.length + 1).padStart(3, '0')}`, ...t, solution: [op('scene.create', { name: 'Eval' }), ...t.solution] });
-  }
+  for (let i = 0; out.length < 100; i++) out.push(withScene(base[i % base.length], `t${String(out.length + 1).padStart(3, '0')}`));
   return out;
 }
 

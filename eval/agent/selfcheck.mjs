@@ -4,6 +4,8 @@
 // bug in the task, not in an agent.
 //
 //   node eval/agent/selfcheck.mjs [path/to/zender] [task-id ...]
+//
+// Checks every set (G1's t001… and P1.5's p001…).
 
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,12 +15,12 @@ import { tasks } from './tasks.mjs';
 import { score } from './check.mjs';
 
 const args = process.argv.slice(2);
-const bin = resolve(args[0] && !/^t\d{3}$/.test(args[0]) ? args.shift() : 'zig-out/bin/zender');
+const bin = resolve(args[0] && !/^[tp]\d{3}$/.test(args[0]) ? args.shift() : 'zig-out/bin/zender');
 const only = new Set(args);
 const base = process.env.ZENDER_EVAL_TMP ?? tmpdir();
 
 let failed = 0;
-const all = tasks().filter((t) => !only.size || only.has(t.id));
+const all = tasks('all').filter((t) => !only.size || only.has(t.id));
 for (const t of all) {
   const dir = mkdtempSync(join(base, `g1-${t.id}-`));
   for (const [name, text] of Object.entries(t.files ?? {})) writeFileSync(join(dir, name), text);

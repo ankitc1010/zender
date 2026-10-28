@@ -74,6 +74,7 @@ export function loadScene(path) {
     return w;
   };
   const meshes = new Map(d.meshes.map((m) => [m.name, m]));
+  const curves = new Map((d.curves ?? []).map((c) => [c.name, c]));
   const objects = d.objects.map((o) => {
     const w = world(o);
     const out = { name: o.name, type: o.properties.type, world: w, props: o.properties, parent: o.parent, modifiers: o.modifiers ?? [], data: o.data };
@@ -103,6 +104,22 @@ export function loadScene(path) {
         }
         return v / 6;
       };
+    } else if (o.properties.type === 'curve' && curves.has(o.data)) {
+      // The tube around the control points: their bounds grown by the
+      // largest radius (exact for poly splines with round ends, a little
+      // generous for flat caps and NURBS).
+      const c = curves.get(o.data);
+      out.curve = c;
+      out.materials = c.materials ?? [];
+      const k = Math.max(...[0, 1, 2].map((j) => Math.hypot(w[j * 4], w[j * 4 + 1], w[j * 4 + 2])));
+      const r = c.properties.bevel_depth * Math.max(...c.radius, 0) * Math.max(c.properties.taper_start, c.properties.taper_end, 1) * k;
+      const wp = c.points.map((p) => apply(w, p));
+      out.points = wp;
+      if (wp.length) {
+        const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+        for (const p of wp) for (let j = 0; j < 3; j++) { lo[j] = Math.min(lo[j], p[j] - r); hi[j] = Math.max(hi[j], p[j] + r); }
+        out.bounds = [lo, hi];
+      }
     } else {
       const o0 = apply(w, [0, 0, 0]);
       out.bounds = [o0, o0];
@@ -114,6 +131,8 @@ export function loadScene(path) {
     objects,
     object: (name) => objects.find((o) => o.name.toLowerCase() === name.toLowerCase()),
     materials: new Map(d.materials.map((m) => [m.name, m.properties])),
+    materialData: new Map(d.materials.map((m) => [m.name, m])),
+    images: new Map((d.images ?? []).map((i) => [i.name, i.properties])),
     lights: new Map(d.lights.map((l) => [l.name, l.properties])),
     cameras: new Map(d.cameras.map((c) => [c.name, c.properties])),
     activeCamera: d.scene.camera,
@@ -124,6 +143,34 @@ export function loadScene(path) {
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 const size = (o) => o.bounds[1].map((h, k) => h - o.bounds[0][k]);
 const center = (o) => o.bounds[1].map((h, k) => (h + o.bounds[0][k]) / 2);
+const sub = (a, b) => a.map((x, k) => x - b[k]);
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+// Nearest hit of a ray on a mesh object's faces (fan triangles), or null.
+function rayHit(o, from, dir) {
+  const off = o.mesh.face_offsets, cv = o.mesh.corner_verts, P = o.points;
+  let best = Infinity;
+  for (let f = 0; f + 1 < off.length; f++) {
+    const a = P[cv[off[f]]];
+    for (let c = off[f] + 1; c + 1 < off[f + 1]; c++) {
+      const e1 = sub(P[cv[c]], a), e2 = sub(P[cv[c + 1]], a);
+      const h = cross(dir, e2), det = dot(e1, h);
+      if (Math.abs(det) < 1e-12) continue;
+      const t0 = sub(from, a), u = dot(t0, h) / det;
+      if (u < -1e-9 || u > 1 + 1e-9) continue;
+      const q = cross(t0, e1), w = dot(dir, q) / det;
+      if (w < -1e-9 || u + w > 1 + 1e-9) continue;
+      const t = dot(e2, q) / det;
+      if (t > 0 && t < best) best = t;
+    }
+  }
+  return best === Infinity ? null : from.map((x, k) => x + dir[k] * best);
+}
+
+// The material names on an object, by slot (mesh or curve data).
+const slotMaterials = (o) => o.materials ?? [];
+
 const fmt = (v) => (Array.isArray(v) ? `[${v.map((x) => +x.toFixed(3)).join(', ')}]` : +(+v).toFixed(3));
 
 // Each check returns null when it passes, else what was wrong.
@@ -142,7 +189,7 @@ const checks = {
   },
   size(s, c) {
     const o = s.object(c.name);
-    if (!o?.mesh) return `no mesh object ${c.name}`;
+    if (!o?.mesh && !o?.curve) return `no mesh or curve object ${c.name}`;
     const got = size(o);
     return c.size.every((x, k) => x == null || near(got[k], x, c.tol ?? 0.05)) ? null : `${c.name} is ${fmt(got)}, want ${fmt(c.size)}`;
   },
@@ -181,8 +228,8 @@ const checks = {
   },
   material(s, c) {
     const o = s.object(c.name);
-    if (!o?.mesh) return `no mesh object ${c.name}`;
-    const mats = o.materials.filter(Boolean);
+    if (!o?.mesh && !o?.curve) return `no mesh or curve object ${c.name}`;
+    const mats = slotMaterials(o).filter(Boolean);
     if (!mats.length) return `${c.name} has no material`;
     if (c.material && !mats.some((m) => m.toLowerCase() === c.material.toLowerCase())) return `${c.name} uses ${mats.join(', ')}, not ${c.material}`;
     const props = mats.map((m) => s.materials.get(m));
@@ -272,6 +319,111 @@ const checks = {
       if (!set.has(key(m))) miss++;
     }
     return miss <= o.points.length * 0.02 ? null : `${miss} of ${o.points.length} points have no mirror partner`;
+  },
+  ray(s, c) {
+    // Where a ray first meets the surface, on one axis: shape probes that
+    // hold whichever tool made the mesh.
+    const o = s.object(c.name);
+    if (!o?.mesh) return `no mesh object ${c.name}`;
+    const n = Math.hypot(...c.dir);
+    const hit = rayHit(o, c.from, c.dir.map((x) => x / n));
+    if (!hit) return `a ray from ${fmt(c.from)} along ${fmt(c.dir)} misses ${c.name}`;
+    const k = 'xyz'.indexOf(c.axis);
+    const got = hit[k];
+    if (c.gt != null && !(got > c.gt)) return `${c.name}'s surface along ${fmt(c.dir)} from ${fmt(c.from)} is at ${c.axis} = ${fmt(got)}, want > ${fmt(c.gt)}`;
+    if (c.lt != null && !(got < c.lt)) return `${c.name}'s surface along ${fmt(c.dir)} from ${fmt(c.from)} is at ${c.axis} = ${fmt(got)}, want < ${fmt(c.lt)}`;
+    return null;
+  },
+  closed(s, c) {
+    // A watertight mesh (every edge between two faces), or a curve whose
+    // tube has caps.
+    const o = s.object(c.name);
+    if (o?.curve) return o.curve.properties.bevel_depth > 0 && o.curve.properties.use_fill_caps ? null : `${c.name}'s tube has open ends`;
+    if (!o?.mesh) return `no mesh or curve object ${c.name}`;
+    const off = o.mesh.face_offsets, cv = o.mesh.corner_verts, uses = new Map();
+    for (let f = 0; f + 1 < off.length; f++) for (let k = off[f]; k < off[f + 1]; k++) {
+      const a = cv[k], b = cv[k + 1 < off[f + 1] ? k + 1 : off[f]];
+      const key = a < b ? `${a},${b}` : `${b},${a}`;
+      uses.set(key, (uses.get(key) ?? 0) + 1);
+    }
+    const open = [...uses.values()].filter((u) => u !== 2).length;
+    return open ? `${c.name} has ${open} edges not shared by exactly two faces` : null;
+  },
+  texture(s, c) {
+    // A procedural texture recipe on a material input (any slot), and with
+    // baked, the image material.bake made from it.
+    const o = s.object(c.name);
+    if (!o) return `no object ${c.name}`;
+    const input = c.input ?? 'base_color';
+    const mats = slotMaterials(o).filter(Boolean).map((m) => s.materialData.get(m)).filter(Boolean);
+    const withTex = mats.filter((m) => m.textures?.[input]);
+    if (!withTex.length) return `${c.name} has no material with a texture on ${input}`;
+    const ok = withTex.filter((m) => {
+      const t = m.textures[input];
+      if (c.texture && t.texture !== c.texture) return false;
+      if (c.ramp_mode && t.ramp?.mode !== c.ramp_mode) return false;
+      if (c.min_stops && (t.ramp?.stops?.length ?? 0) < c.min_stops) return false;
+      return true;
+    });
+    if (!ok.length) {
+      const t = withTex[0].textures[input];
+      return `${c.name}'s ${input} texture is ${t.texture} with ${t.ramp ? `a ${t.ramp.mode} ramp of ${t.ramp.stops.length} stops` : 'no ramp'}, want ${c.texture ?? 'any'}${c.ramp_mode ? ` with a ${c.ramp_mode} ramp` : ''}${c.min_stops ? ` of at least ${c.min_stops} stops` : ''}`;
+    }
+    if (c.baked) {
+      const img = ok.map((m) => m[`${input}_image`]).find((n) => n && s.images.has(n));
+      if (!img) return `${c.name}'s ${input} texture is not baked to an image`;
+      const p = s.images.get(img);
+      if (c.size && (p.width !== c.size || p.height !== c.size)) return `baked image ${img} is ${p.width} x ${p.height}, want ${c.size} x ${c.size}`;
+    }
+    return null;
+  },
+  face_material(s, c) {
+    // One mesh, two materials split at a plane: faces wholly above it use
+    // one colour, faces wholly below the other, and none straddle it.
+    const o = s.object(c.name);
+    if (!o?.mesh) return `no mesh object ${c.name}`;
+    const k = 'xyz'.indexOf(c.axis), eps = c.eps ?? 1e-3, tol = c.tol ?? 0.25;
+    const idx = o.mesh.attributes.find((a) => a.name === 'material_index')?.data;
+    const off = o.mesh.face_offsets, cv = o.mesh.corner_verts;
+    const colourOf = (f) => s.materials.get(slotMaterials(o)[idx ? idx[f] : 0])?.base_color;
+    const like = (col, want) => col && want.every((x, j) => near(col[j], x, tol));
+    let above = 0, below = 0;
+    for (let f = 0; f + 1 < off.length; f++) {
+      const hs = [];
+      for (let q = off[f]; q < off[f + 1]; q++) hs.push(o.points[cv[q]][k]);
+      const up = hs.every((h) => h >= c.at - eps), down = hs.every((h) => h <= c.at + eps);
+      if (!up && !down) return `a face of ${c.name} crosses ${c.axis} = ${c.at}; split the mesh there first`;
+      const col = colourOf(f);
+      if (up && !down) {
+        if (!like(col, c.above)) return `a face of ${c.name} above ${c.axis} = ${c.at} is ${col ? fmt(col.slice(0, 3)) : 'without material'}, want ${fmt(c.above)}`;
+        above++;
+      } else if (down && !up) {
+        if (!like(col, c.below)) return `a face of ${c.name} below ${c.axis} = ${c.at} is ${col ? fmt(col.slice(0, 3)) : 'without material'}, want ${fmt(c.below)}`;
+        below++;
+      }
+    }
+    return above && below ? null : `${c.name} needs faces both above and below ${c.axis} = ${c.at}`;
+  },
+  passes(s, c) {
+    // The object runs through each point: a curve's control path within
+    // tol of it, or a mesh vertex within radius + tol (a tube's surface).
+    const o = s.object(c.name);
+    if (!o?.mesh && !o?.curve) return `no mesh or curve object ${c.name}`;
+    const segDist = (p, a, b) => {
+      const ab = sub(b, a), l2 = dot(ab, ab);
+      const t = l2 > 0 ? Math.max(0, Math.min(1, dot(sub(p, a), ab) / l2)) : 0;
+      return Math.hypot(...sub(p, a.map((x, k) => x + ab[k] * t)));
+    };
+    for (const p of c.points) {
+      let d = Infinity;
+      if (o.curve) {
+        const so = o.curve.spline_offsets;
+        for (let i = 0; i + 1 < so.length; i++) for (let k = so[i]; k < so[i + 1]; k++) d = Math.min(d, segDist(p, o.points[k], o.points[Math.min(k + 1, so[i + 1] - 1)]));
+      } else for (const q of o.points) d = Math.min(d, Math.hypot(...sub(q, p)));
+      const lim = (o.curve ? 0 : c.radius ?? 0) + (c.tol ?? 0.05);
+      if (d > lim) return `${c.name} does not pass through ${fmt(p)} (nearest ${fmt(d)} m away)`;
+    }
+    return null;
   },
   file(_s, c, dir) {
     const p = join(dir, c.path);

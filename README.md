@@ -4,7 +4,7 @@ A headless 3D scene engine in Zig that LLM agents drive through the Model Contex
 
 Zender borrows Blender's concepts (datablocks, an RNA-style property registry, Blender's primitives and defaults) but is an independent implementation, not a fork. The design is in the [technical requirements document](https://claude.ai/artifact/6DEysg565wv9dJ7wv7XRQi).
 
-**Status: P0 (Foundations) done, P1 (Modeling) under way; version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, group them in collections, edit meshes element by element (select, extrude, inset, loop cut, bevel, triangulate, merge, transform), combine them with booleans, stack non-destructive modifiers on them (array, mirror, solidify, subdivision, bevel, boolean, displace, decimate, triangulate), UV-unwrap them, look at them with a preview renderer, export glTF 2.0, OBJ, STL, PLY or a canonical `scene.json`, and import OBJ, STL and PLY. `.blend` I/O comes next (see [Roadmap](#roadmap)).
+**Status: P0 (Foundations) and P1 (Modeling) done apart from the paid agent-evaluation run; P1.5 (Materials and modelling) under way; version 0.1.0-dev.** Agents can build scenes from primitives, materials, cameras and lights, group them in collections, edit meshes element by element (select, extrude, inset, loop cut, bevel, triangulate, merge, transform, smooth, sculpt), combine them with booleans, stack non-destructive modifiers on them (array, mirror, solidify, subdivision, bevel, boolean, displace, decimate, triangulate), UV-unwrap them, look at them with a preview renderer, export glTF 2.0, OBJ, STL, PLY or a canonical `scene.json`, and import OBJ, STL and PLY. P1.5 adds organic modelling with blended implicit shapes (`mesh.from_sdf`), lathed profiles (`mesh.revolve`), meshes from raw data, curves swept into tubes, per-face material slots, coat, sheen and specular, procedural textures that match Blender's Noise, Wave and Voronoi nodes, and baking them to images that glTF carries. `.blend` I/O comes next (see [Roadmap](#roadmap)).
 
 ## Build
 
@@ -54,10 +54,11 @@ Observability: `serve` writes one JSON log line per tool call to stderr (`--log-
 | --- | --- |
 | Scene | `scene.create`, `scene.inspect`, `scene.validate`, `scene.undo`, `scene.redo`, `scene.apply`, `scene.close` |
 | Object | `object.add_primitive`, `object.duplicate`, `object.delete`, `object.transform`, `object.set_parent`, `object.set_properties` |
+| Create | `mesh.from_data`, `mesh.revolve`, `mesh.from_sdf`, `curve.add`, `curve.to_mesh` |
 | Mesh | `mesh.select_preview`, `mesh.transform_elements`, `mesh.extrude`, `mesh.inset`, `mesh.triangulate`, `mesh.merge`, `mesh.loop_cut`, `mesh.bevel`, `mesh.uv_unwrap`, `mesh.boolean`, `mesh.smooth`, `mesh.sculpt` |
 | Modifier | `modifier.add`, `modifier.update`, `modifier.remove`, `modifier.apply` |
 | Collection | `collection.create`, `collection.update`, `collection.delete` |
-| Shading | `material.create`, `material.update`, `material.assign`, `world.set` |
+| Shading | `material.create`, `material.update`, `material.assign`, `material.bake`, `world.set` |
 | Camera and light | `camera.add`, `camera.look_at`, `camera.frame_objects`, `light.add` |
 | Render | `render.preview` |
 | I/O | `io.export`, `io.import` |
@@ -97,14 +98,16 @@ Five layers; `build.zig` gives each module imports only from lower layers, so an
 
 ## Testing
 
-`zig build test` runs 121 tests: math, data model, collections, undo, scene.json, primitives, normals, EditMesh, selectors, the mesh operators and UV unwrapping, OBJ/STL/PLY reading and writing, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG encode and decode, glTF export, path confinement, budgets and tracing, the command core end to end, command-log replay, the MCP protocol, and two golden suites:
+`zig build test` runs 142 tests: math, data model, collections, undo, scene.json, primitives, normals, EditMesh, selectors, the mesh operators and UV unwrapping, OBJ/STL/PLY reading and writing, the rasteriser (including near-plane clipping and 1/4/16-thread determinism), PNG encode and decode, glTF export, path confinement, budgets and tracing, the command core end to end, command-log replay, the MCP protocol, and two golden suites:
 
 - **Golden geometry** (`tests/golden/geometry.json`, `tests/golden/mesh_ops.json`): 12 primitive cases and 31 mesh-operator, modifier and sculpt cases, each a short `scene.apply` op list. Counts and a digest of the connectivity must match exactly. Bounds, area, volume and UV sums must match within a tolerance, because trigonometry may differ in the last bit between platforms' libm.
 - **Golden render** (`tests/golden/render/`): 5 previews replayed from command logs, compared by PSNR (≥ 40 dB) and the share of pixels off by more than 8 levels (≤ 0.2%).
 
 The official MCP conformance suite tests servers over HTTP only, so it joins CI with Streamable HTTP in P3. Until then `scripts/inspector-session.sh` drives the server with MCP Inspector over stdio in both protocol eras, with `--strict` schema checks. Still to come: FLIP for renders, Blender parity, fuzzing and benchmark gates.
 
-**Agent evaluation (G1, `eval/agent/`).** 100 tasks across ten categories (primitives, arrangement, materials, cameras and lights, mesh editing, booleans, modifiers, UVs and files, organic shapes, small scenes), each a request in plain words, checks on the scene the agent exports (sizes, bounds, volumes, face counts, materials, modifiers, camera aim, symmetry, files) and a reference solution. `node eval/agent/selfcheck.mjs` replays every reference solution and checks that an empty scene fails every task; it runs in CI. `node eval/agent/run.mjs --models sonnet,opus` gives each task to a fresh headless Claude Code session whose only tools are a Zender server confined to a temporary directory, scores the result and writes `results.jsonl` and `summary.md`. Each run is a paid session (Sonnet about $0.03–0.13 a task, Opus about $0.3).
+**Agent evaluation (G1 and G1.5, `eval/agent/`).** 100 G1 tasks across ten categories (primitives, arrangement, materials, cameras and lights, mesh editing, booleans, modifiers, UVs and files, organic shapes, small scenes), each a request in plain words, checks on the scene the agent exports (sizes, bounds, volumes, face counts, materials, modifiers, camera aim, symmetry, files) and a reference solution, plus 15 P1.5 tasks (`--set p15`: blended shapes, rounded and dented solids, pipes and rope rims, textured and baked materials, two-material meshes, a lathed vase) scored with ray probes, watertightness, texture recipes and per-face materials, so any route to the right shape passes. `node eval/agent/selfcheck.mjs` replays every reference solution and checks that an empty scene fails every task; it runs in CI. `node eval/agent/run.mjs --models sonnet,opus [--set p15]` gives each task to a fresh headless Claude Code session whose only tools are a Zender server confined to a temporary directory, scores the result and writes `results.jsonl` and `summary.md`. Each run is a paid session (Sonnet about $0.03–0.13 a task, Opus about $0.3).
+
+**Blender parity for P1.5 (G1.5, `examples/bust/`).** `bust_spec.py` describes a sculpted bust once; `gen_zender.py` turns it into `examples/bust.jsonl` (62 calls, 3.15 M triangles, replayed in CI and checked with the Khronos validator), and two Blender scripts build the same bust with Blender's own tools and compare. `blender_parity.py` checks every part (symmetric Hausdorff distance within one voxel, volume within 1%; `ONLY=Head,Hair` runs a few parts per process where memory is short): all 21 parts pass, most at 0 mm. `blender_materials.py` checks every material value against a Blender node tree built from the spec, and Zender's bakes against Cycles' bakes of the same recipes and UVs (RMSE at most 1/255).
 
 Checks run by hand during P0:
 
@@ -134,6 +137,7 @@ Measured on a phone (MediaTek Dimensity 9400, 8 cores, ReleaseSafe). The TRD's t
 | --- | --- | --- |
 | P0 Foundations (this release) | Data model, registry, collections, command core, log, MCP stdio, primitives, cameras, preview render, glTF, scene.json | An agent builds a scene and exports glTF |
 | P1 Modeling | EditMesh, selectors, 10 mesh operators, modifier stack, depsgraph, OBJ/STL/PLY | Golden and determinism suites green; agent eval ≥ 50% |
+| P1.5 Materials and modelling | Implicit shapes, curves, revolve, raw meshes, per-face slots, Principled layers, procedural textures, bake | The bust rebuilt in Zender matches Blender part by part |
 | P2 Blender interop | `.blend` read and write, images, keyframes, parity harness, loss reports | Round-trip parity on the `.blend` corpus |
 | P3 Production | CPU path tracer, MCP tasks, Streamable HTTP and auth, C ABI, fuzzing, benchmarks | All NFRs met, agent eval ≥ 80%, 24 h fuzz clean |
 

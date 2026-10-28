@@ -3,8 +3,10 @@
 // temporary directory; the scene the agent exports is then scored with the
 // task's checks. Costs real money: every task × model is one paid session.
 //
-//   node eval/agent/run.mjs --models sonnet,opus [--tasks t001,t002 | --limit 10]
+//   node eval/agent/run.mjs --models sonnet,opus [--set g1|p15|all] [--tasks t001,t002 | --limit 10]
 //        [--budget 1.0] [--jobs 2] [--out eval/agent/out] [--bin zig-out/bin/zender]
+//
+// Sets other than g1 default to their own out directory (out-p15, out-all).
 //
 // Writes <out>/results.jsonl (one line per run, appended as runs finish, so a
 // rerun skips what is done) and <out>/summary.md.
@@ -15,17 +17,18 @@ import { spawn } from 'node:child_process';
 import { tasks, instructions } from './tasks.mjs';
 import { score } from './check.mjs';
 
-const opt = { models: 'sonnet', budget: '1.0', jobs: '2', out: 'eval/agent/out', bin: 'zig-out/bin/zender' };
+const opt = { set: 'g1', models: 'sonnet', budget: '1.0', jobs: '2', bin: 'zig-out/bin/zender' };
 for (let a = process.argv.slice(2); a.length; ) {
   const k = a.shift().replace(/^--/, '');
   opt[k] = a.shift();
 }
+opt.out ??= opt.set === 'g1' ? 'eval/agent/out' : `eval/agent/out-${opt.set}`;
 const bin = resolve(opt.bin);
 const out = resolve(opt.out);
 mkdirSync(out, { recursive: true });
 const resultsPath = join(out, 'results.jsonl');
 
-let list = tasks();
+let list = tasks(opt.set);
 if (opt.tasks) list = list.filter((t) => opt.tasks.split(',').includes(t.id));
 if (opt.limit) list = list.slice(0, +opt.limit);
 const models = opt.models.split(',');
@@ -97,7 +100,7 @@ const median = (xs) => {
   const s = xs.filter((x) => x != null).sort((a, b) => a - b);
   return s.length ? s[Math.floor(s.length / 2)] : null;
 };
-const lines = ['# G1 agent evaluation', '', '| model | tasks | pass | median turns | total cost |', '|---|---|---|---|---|'];
+const lines = [`# ${{ g1: 'G1', p15: 'P1.5', all: 'G1 and P1.5' }[opt.set] ?? opt.set} agent evaluation`, '', '| model | tasks | pass | median turns | total cost |', '|---|---|---|---|---|'];
 for (const m of [...new Set(all.map((r) => r.model))]) {
   const rs = all.filter((r) => r.model === m);
   lines.push(`| ${m} | ${rs.length} | ${pct(rs)} | ${median(rs.map((r) => r.turns)) ?? '–'} | $${rs.reduce((s, r) => s + (r.cost_usd ?? 0), 0).toFixed(2)} |`);
