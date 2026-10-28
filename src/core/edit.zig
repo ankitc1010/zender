@@ -325,6 +325,11 @@ pub fn duplicateObject(doc: *Document, ob_h: IdHandle, name: []const u8, linked:
             },
             .camera => try doc.db.create(.camera, doc.db.get(.camera, d).?.name.slice(), doc.db.get(.camera, d).?.*),
             .light => try doc.db.create(.light, doc.db.get(.light, d).?.name.slice(), doc.db.get(.light, d).?.*),
+            .curve => blk: {
+                var cu = doc.db.get(.curve, d).?.*;
+                cu.retainRefs();
+                break :blk try doc.db.create(.curve, cu.name.slice(), cu);
+            },
             .empty => null,
         };
     };
@@ -348,16 +353,20 @@ pub fn duplicateObject(doc: *Document, ob_h: IdHandle, name: []const u8, linked:
 /// list as needed.
 pub fn assignMaterial(doc: *Document, ob_h: IdHandle, material: ?IdHandle, slot: usize) EditError!void {
     const ob = doc.db.get(.object, ob_h) orelse return error.StaleHandle;
-    if (ob.kind != .mesh) return error.WrongType;
-    const mesh = doc.db.get(.mesh, ob.data orelse return error.StaleHandle) orelse return error.StaleHandle;
-    const old = mesh.materials.slice();
+    const d = ob.data orelse return error.StaleHandle;
+    const list = switch (ob.kind) {
+        .mesh => &(doc.db.get(.mesh, d) orelse return error.StaleHandle).materials,
+        .curve => &(doc.db.get(.curve, d) orelse return error.StaleHandle).materials,
+        else => return error.WrongType,
+    };
+    const old = list.slice();
     const n = @max(old.len, slot + 1);
     const items = try doc.gpa.alloc(?IdHandle, n);
     @memcpy(items[0..old.len], old);
     @memset(items[old.len..], null);
     items[slot] = material;
-    mesh.materials.release(doc.gpa);
-    mesh.materials = try .fromOwned(doc.gpa, items);
+    list.release(doc.gpa);
+    list.* = try .fromOwned(doc.gpa, items);
 }
 
 /// Moves faces (sorted indices) of a mesh object to material slot `slot`

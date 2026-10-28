@@ -152,6 +152,7 @@ fn inspect(c: *Call) HandlerError!void {
             switch (ob.kind) {
                 .camera => try core.registry.writeValues(core.types.Camera, doc.db.get(.camera, d).?, w),
                 .light => try core.registry.writeValues(core.types.Light, doc.db.get(.light, d).?, w),
+                .curve => try core.registry.writeValues(core.types.Curve, doc.db.get(.curve, d).?, w),
                 .mesh => {
                     const m = doc.db.get(.mesh, d).?;
                     try w.beginObject();

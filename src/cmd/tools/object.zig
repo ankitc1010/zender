@@ -215,6 +215,7 @@ fn duplicate(c: *Call) HandlerError!void {
             .mesh => doc.db.get(.mesh, d).?.name.slice(),
             .camera => doc.db.get(.camera, d).?.name.slice(),
             .light => doc.db.get(.light, d).?.name.slice(),
+            .curve => doc.db.get(.curve, d).?.name.slice(),
             .empty => "",
         };
         try c.markCreated(d, data_name);
@@ -302,7 +303,8 @@ fn setProperties(c: *Call) HandlerError!void {
         switch (ob.kind) {
             .camera => n += try common.setProperties(c, core.types.Camera, doc.db.get(.camera, d).?, p, "data"),
             .light => n += try common.setProperties(c, core.types.Light, doc.db.get(.light, d).?, p, "data"),
-            else => return c.failAt(.invalid_argument, "/data", "mesh data is edited with mesh.* and material.* tools", &.{}, "'{s}' is a {s}; data properties apply to cameras and lights", .{ ob.name.slice(), @tagName(ob.kind) }),
+            .curve => n += try common.setProperties(c, core.types.Curve, doc.db.get(.curve, d).?, p, "data"),
+            else => return c.failAt(.invalid_argument, "/data", "mesh data is edited with mesh.* and material.* tools", &.{}, "'{s}' is a {s}; data properties apply to cameras, lights and curves", .{ ob.name.slice(), @tagName(ob.kind) }),
         }
         if (ob.kind == .camera) {
             const cam = doc.db.get(.camera, d).?;

@@ -114,6 +114,7 @@ pub fn write(arena: Allocator, doc: *Document, w: *Stringify, opts: Options) Err
             .mesh => try writeRef(w, db, .mesh, ob.data),
             .camera => try writeRef(w, db, .camera, ob.data),
             .light => try writeRef(w, db, .light, ob.data),
+            .curve => try writeRef(w, db, .curve, ob.data),
             .empty => try w.write(null),
         }
         try w.objectField("parent");
@@ -154,6 +155,11 @@ pub fn write(arena: Allocator, doc: *Document, w: *Stringify, opts: Options) Err
     for (try sorted(arena, db, .mesh)) |h| try writeMesh(arena, w, db, db.get(.mesh, h).?, opts);
     try w.endArray();
 
+    try w.objectField("curves");
+    try w.beginArray();
+    for (try sorted(arena, db, .curve)) |h| try writeCurve(w, db, db.get(.curve, h).?, opts);
+    try w.endArray();
+
     try writeSimple(arena, w, db, .camera, "cameras");
     try writeSimple(arena, w, db, .light, "lights");
     try writeSimple(arena, w, db, .material, "materials");
@@ -185,6 +191,49 @@ fn writeRefList(w: *Stringify, db: *Database, comptime t: ids.IdType, list: []co
     try w.beginArray();
     for (list) |h| if (db.get(t, h)) |d| try w.write(d.name.slice());
     try w.endArray();
+}
+
+fn writeCurve(w: *Stringify, db: *Database, c: *const types.Curve, opts: Options) Error!void {
+    try w.beginObject();
+    try w.objectField("name");
+    try w.write(c.name.slice());
+    try w.objectField("properties");
+    try registry.writeStoredValues(types.Curve, c, w);
+    try w.objectField("splines");
+    try w.write(c.splineCount());
+    try w.objectField("points");
+    try w.write(c.points.len());
+    switch (opts.geometry) {
+        .hash => {
+            try w.objectField("topology_xxh64");
+            var h = std.hash.XxHash64.init(0);
+            h.update(std.mem.sliceAsBytes(c.spline_offsets.slice()));
+            h.update(std.mem.sliceAsBytes(c.spline_type.slice()));
+            h.update(std.mem.sliceAsBytes(c.spline_order.slice()));
+            try writeHex(w, h.final());
+            try w.objectField("points_xxh64");
+            try writeHex(w, digest(c.points.slice()));
+            try w.objectField("radius_xxh64");
+            try writeHex(w, digest(c.radius.slice()));
+            try w.objectField("tilt_xxh64");
+            try writeHex(w, digest(c.tilt.slice()));
+        },
+        .full => {
+            try w.objectField("spline_offsets");
+            try w.write(c.spline_offsets.slice());
+            try w.objectField("points");
+            try writeFloats(w, c.points.slice());
+            try w.objectField("radius");
+            try writeFloats(w, c.radius.slice());
+            try w.objectField("tilt");
+            try writeFloats(w, c.tilt.slice());
+        },
+    }
+    try w.objectField("materials");
+    try w.beginArray();
+    for (c.materials.slice()) |slot| try writeRef(w, db, .material, slot);
+    try w.endArray();
+    try w.endObject();
 }
 
 fn writeSimple(arena: Allocator, w: *Stringify, db: *Database, comptime t: ids.IdType, field: []const u8) Error!void {

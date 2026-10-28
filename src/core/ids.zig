@@ -15,6 +15,7 @@ pub const IdType = enum(u8) {
     image,
     world,
     action,
+    curve,
 
     /// Blender's two-letter ID code, used in handle strings and .blend I/O.
     pub fn code(t: IdType) []const u8 {
@@ -29,6 +30,7 @@ pub const IdType = enum(u8) {
             .image => "IM",
             .world => "WO",
             .action => "AC",
+            .curve => "CU",
         };
     }
 

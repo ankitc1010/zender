@@ -71,7 +71,7 @@ pub const Collection = struct {
     }
 };
 
-pub const ObjectKind = enum { empty, mesh, camera, light };
+pub const ObjectKind = enum { empty, mesh, camera, light, curve };
 
 /// Blender's rotation modes; Euler orders name the order axes are applied.
 pub const RotationMode = enum { quaternion, xyz, xzy, yxz, yzx, zxy, zyx };
@@ -490,6 +490,67 @@ pub const World = struct {
     pub fn releaseRefs(_: *World, _: Allocator) void {}
 };
 
+pub const SplineType = enum(u8) { poly, nurbs };
+
+/// Legacy curve data (Blender's Curve ID): splines of control points with a
+/// radius and tilt each, swept into a tube by the bevel settings. Arrays are
+/// structure of arrays; spline s owns points spline_offsets[s] ..
+/// spline_offsets[s + 1].
+pub const Curve = struct {
+    name: Name = .{},
+    points: Shared(Vec3) = .empty,
+    radius: Shared(f32) = .empty,
+    /// Radians about the tangent.
+    tilt: Shared(f32) = .empty,
+    spline_offsets: Shared(u32) = .empty,
+    /// SplineType per spline.
+    spline_type: Shared(u8) = .empty,
+    /// NURBS order per spline (ignored for poly).
+    spline_order: Shared(u8) = .empty,
+    /// Material per slot, as on meshes.
+    materials: Shared(?IdHandle) = .empty,
+    bevel_depth: f32 = 0,
+    bevel_resolution: i32 = 4,
+    resolution_u: i32 = 12,
+    use_fill_caps: bool = false,
+    taper_start: f32 = 1,
+    taper_end: f32 = 1,
+
+    pub const props = [_]Prop{
+        .{ .name = "bevel_depth", .field = "bevel_depth", .kind = .float, .unit = .length, .min = 0, .max = 1e6, .doc = "Tube radius (times each point's radius); 0 = no surface", .blend = "bevel_radius" },
+        .{ .name = "bevel_resolution", .field = "bevel_resolution", .kind = .int, .min = 0, .max = 32, .doc = "Ring smoothness: 4 + 2 x this vertices around", .blend = "bevresol" },
+        .{ .name = "resolution_u", .field = "resolution_u", .kind = .int, .min = 1, .max = 1024, .doc = "Samples per NURBS span", .blend = "resolu" },
+        .{ .name = "use_fill_caps", .field = "use_fill_caps", .kind = .bool, .doc = "Close the tube ends" },
+        .{ .name = "taper_start", .field = "taper_start", .kind = .float, .unit = .factor, .min = 0, .max = 100, .doc = "Radius factor at the start" },
+        .{ .name = "taper_end", .field = "taper_end", .kind = .float, .unit = .factor, .min = 0, .max = 100, .doc = "Radius factor at the end" },
+    };
+
+    pub fn splineCount(c: *const Curve) usize {
+        const n = c.spline_offsets.len();
+        return if (n == 0) 0 else n - 1;
+    }
+
+    pub fn retainRefs(c: *Curve) void {
+        _ = c.points.retain();
+        _ = c.radius.retain();
+        _ = c.tilt.retain();
+        _ = c.spline_offsets.retain();
+        _ = c.spline_type.retain();
+        _ = c.spline_order.retain();
+        _ = c.materials.retain();
+    }
+
+    pub fn releaseRefs(c: *Curve, gpa: Allocator) void {
+        c.points.release(gpa);
+        c.radius.release(gpa);
+        c.tilt.release(gpa);
+        c.spline_offsets.release(gpa);
+        c.spline_type.release(gpa);
+        c.spline_order.release(gpa);
+        c.materials.release(gpa);
+    }
+};
+
 /// Maps an ID type to its struct.
 pub fn TypeOf(comptime t: ids.IdType) type {
     return switch (t) {
@@ -501,9 +562,10 @@ pub fn TypeOf(comptime t: ids.IdType) type {
         .light => Light,
         .material => Material,
         .world => World,
+        .curve => Curve,
         .image, .action => @compileError("not implemented before P2"),
     };
 }
 
 /// ID types the database stores today, in canonical order.
-pub const stored_types = [_]ids.IdType{ .scene, .collection, .object, .mesh, .camera, .light, .material, .world };
+pub const stored_types = [_]ids.IdType{ .scene, .collection, .object, .mesh, .curve, .camera, .light, .material, .world };

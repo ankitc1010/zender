@@ -110,6 +110,24 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
                     slots[s] = if (mh) |x| if (db.get(.material, x)) |mat| try materialIndex(arena, &maps, &materials, x, mat) else null else null;
                 }
             },
+            .curve => if (db.get(.curve, d)) |cu| curve_blk: {
+                // Curves evaluate to their tube mesh for previews and export.
+                var tm = geom.curve.toMesh(arena, cu) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => break :curve_blk,
+                };
+                if (tm.faceCount() > 0) {
+                    var em = try evaluateMesh(arena, ctx, &tm);
+                    em.name = try arena.dupe(u8, cu.name.slice());
+                    kind = .{ .mesh = @intCast(meshes.items.len) };
+                    try meshes.append(arena, em);
+                    const mats = cu.materials.slice();
+                    slots = try arena.alloc(?u32, mats.len);
+                    for (mats, 0..) |mh, s| {
+                        slots[s] = if (mh) |x| if (db.get(.material, x)) |mat| try materialIndex(arena, &maps, &materials, x, mat) else null else null;
+                    }
+                }
+            },
             .camera => if (db.get(.camera, d)) |c| {
                 kind = .{ .camera = try cameraIndex(arena, &maps, &cameras, d, c) };
             },

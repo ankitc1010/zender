@@ -140,6 +140,13 @@ pub fn writeObjectSummary(c: *Call, w: *std.json.Stringify, h: IdHandle) Handler
                     try w.endArray();
                 }
             } else try w.write(null),
+            .curve => if (doc.db.get(.curve, d)) |cu| {
+                try w.write(cu.name.slice());
+                try w.objectField("splines");
+                try w.write(cu.splineCount());
+                try w.objectField("points");
+                try w.write(cu.points.len());
+            } else try w.write(null),
             .camera => try w.write(if (doc.db.get(.camera, d)) |x| x.name.slice() else ""),
             .light => if (doc.db.get(.light, d)) |x| {
                 try w.write(x.name.slice());

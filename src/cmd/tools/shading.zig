@@ -100,7 +100,8 @@ fn assign(c: *Call) HandlerError!void {
         const path = try std.fmt.allocPrint(c.arena, "/objects/{d}", .{i});
         const h = try c.lookup(.object, n.string, path);
         const ob = doc.db.get(.object, h).?;
-        if (ob.kind != .mesh) return c.failAt(.invalid_argument, path, "materials go on mesh objects", &.{}, "'{s}' is a {s}, not a mesh", .{ ob.name.slice(), @tagName(ob.kind) });
+        if (ob.kind != .mesh and ob.kind != .curve) return c.failAt(.invalid_argument, path, "materials go on mesh and curve objects", &.{}, "'{s}' is a {s}", .{ ob.name.slice(), @tagName(ob.kind) });
+        if (ob.kind == .curve and c.args.value("selector") != null) return c.failAt(.invalid_argument, "/selector", "convert it with curve.to_mesh first", &.{}, "face selectors apply to meshes; '{s}' is a curve", .{ob.name.slice()});
         core.edit.assignMaterial(doc, h, mat, slot) catch return error.OutOfMemory;
         if (c.args.value("selector") != null) {
             const faces = try mesh_tools.selectedFaces(c, h);

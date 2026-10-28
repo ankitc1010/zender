@@ -135,6 +135,7 @@ pub const Database = struct {
     collection: PoolFor(.collection) = .{},
     object: PoolFor(.object) = .{},
     mesh: PoolFor(.mesh) = .{},
+    curve: PoolFor(.curve) = .{},
     camera: PoolFor(.camera) = .{},
     light: PoolFor(.light) = .{},
     material: PoolFor(.material) = .{},
@@ -256,6 +257,7 @@ fn defaultName(t: IdType) []const u8 {
         .image => "Image",
         .world => "World",
         .action => "Action",
+        .curve => "Curve",
     };
 }
 

@@ -742,3 +742,30 @@ test "mesh.from_sdf models blended shapes with slots and precise errors" {
     const huge = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"voxel_size\":0.001,\"steps\":[{{\"shape\":{{\"type\":\"sphere\",\"radius\":1}}}}]}}", .{id}));
     try testing.expectEqualStrings("/voxel_size", huge.tool_error.path);
 }
+
+test "curve.add sweeps tubes, edits settings, exports and converts" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Crust\",\"properties\":{{\"base_color\":[0.42,0.15,0.03]}}}}", .{id}));
+    const stick = try f.ok("curve.add", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Stick\",\"bevel_depth\":0.034,\"bevel_resolution\":2,\"fill_caps\":true,\"taper_end\":0.8,\"material\":\"Crust\",\"splines\":[{{\"points\":[[0.2,-1.07,-0.27],[1.42,-1.38,-0.2]]}},{{\"type\":\"nurbs\",\"points\":[[0,0,0],[0.3,0,0.2],[0.3,0.3,0.4],[0,0.3,0.6]],\"radii\":[1,1,0.8,0.5],\"tilt\":10}}]}}", .{id}));
+    try testing.expectEqual(@as(i64, 2), stick.object.get("object").?.object.get("splines").?.integer);
+    // No bevel: no surface, with a warning.
+    const bare = try f.ok("curve.add", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Path\",\"splines\":[{{\"points\":[[0,0,0],[1,0,0]]}}]}}", .{id}));
+    try testing.expectEqual(@as(usize, 1), bare.object.get("warnings").?.array.items.len);
+    _ = try f.ok("object.set_properties", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Path\",\"data\":{{\"bevel_depth\":0.05}}}}", .{id}));
+    const bad = try f.call("curve.add", try f.fmt("{{\"scene_id\":\"{s}\",\"splines\":[{{\"points\":[[0,0,0],[1,0,0]],\"radii\":[1]}}]}}", .{id}));
+    try testing.expectEqualStrings("/splines/0/radii", bad.tool_error.path);
+
+    // glTF sees the tubes as meshes.
+    const out = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"sticks.glb\"}}", .{id}));
+    try testing.expectEqual(@as(usize, 0), out.object.get("dropped").?.array.items.len);
+    // Straight spline: 2 rings of 8 (8 quads + 2 caps); NURBS: 37 rings (36 x 8 quads + 2 caps).
+    const conv = try f.ok("curve.to_mesh", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Stick\"}}", .{id}));
+    try testing.expectEqual(@as(i64, 10 + 290), conv.object.get("object").?.object.get("faces").?.integer);
+    try testing.expectEqualStrings("Crust", conv.object.get("object").?.object.get("materials").?.array.items[0].string);
+    _ = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Stick\"}}", .{id}));
+    const again = try f.call("curve.to_mesh", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Stick\"}}", .{id}));
+    try testing.expectEqualStrings("/object", again.tool_error.path);
+}
