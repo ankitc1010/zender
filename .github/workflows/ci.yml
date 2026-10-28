@@ -83,6 +83,9 @@ jobs:
       - name: Memory targets (NFR-5)
         if: matrix.os == 'ubuntu-latest'
         run: node scripts/measure-memory.mjs --check
+      - name: G1 task set self-check (reference solutions pass, an empty scene fails)
+        if: matrix.os == 'ubuntu-latest'
+        run: node eval/agent/selfcheck.mjs
       - name: Khronos glTF validator
         if: matrix.os == 'ubuntu-latest'
         run: |

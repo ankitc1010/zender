@@ -18,7 +18,7 @@ zig build test -Dtarget=wasm32-wasi                  # engine, render and I/O te
 zig build test-compile -Dtarget=x86_64-windows-gnu   # build tests for another target without running them
 ```
 
-CI (`.github/workflows/ci.yml`) checks formatting and cross-compiles the CLI and tests for Linux (x86-64, arm64), macOS (arm64, x86-64), Windows (x86-64) and wasm32-wasi, and runs the WASI tests. It then runs the tests natively on Linux x86-64 and arm64, macOS and Windows, plus the x86-64 macOS tests under Rosetta 2. It replays `examples/dining.jsonl`, checks the MCP handshake over stdio, runs a scripted MCP Inspector session in both protocol eras, checks the memory targets, and validates the exported glTF with the Khronos validator. A separate job measures line coverage with kcov.
+CI (`.github/workflows/ci.yml`) checks formatting and cross-compiles the CLI and tests for Linux (x86-64, arm64), macOS (arm64, x86-64), Windows (x86-64) and wasm32-wasi, and runs the WASI tests. It then runs the tests natively on Linux x86-64 and arm64, macOS and Windows, plus the x86-64 macOS tests under Rosetta 2. It replays `examples/dining.jsonl`, checks the MCP handshake over stdio, runs a scripted MCP Inspector session in both protocol eras, checks the memory targets, replays the reference solutions of the agent-evaluation tasks, and validates the exported glTF with the Khronos validator. A separate job measures line coverage with kcov.
 
 ## Use with an MCP client
 
@@ -102,7 +102,9 @@ Five layers; `build.zig` gives each module imports only from lower layers, so an
 - **Golden geometry** (`tests/golden/geometry.json`, `tests/golden/mesh_ops.json`): 12 primitive cases and 31 mesh-operator, modifier and sculpt cases, each a short `scene.apply` op list. Counts and a digest of the connectivity must match exactly. Bounds, area, volume and UV sums must match within a tolerance, because trigonometry may differ in the last bit between platforms' libm.
 - **Golden render** (`tests/golden/render/`): 5 previews replayed from command logs, compared by PSNR (≥ 40 dB) and the share of pixels off by more than 8 levels (≤ 0.2%).
 
-The official MCP conformance suite tests servers over HTTP only, so it joins CI with Streamable HTTP in P3. Until then `scripts/inspector-session.sh` drives the server with MCP Inspector over stdio in both protocol eras, with `--strict` schema checks. Still to come: FLIP for renders, Blender parity, fuzzing, benchmark gates and agent evaluation.
+The official MCP conformance suite tests servers over HTTP only, so it joins CI with Streamable HTTP in P3. Until then `scripts/inspector-session.sh` drives the server with MCP Inspector over stdio in both protocol eras, with `--strict` schema checks. Still to come: FLIP for renders, Blender parity, fuzzing and benchmark gates.
+
+**Agent evaluation (G1, `eval/agent/`).** 100 tasks across ten categories (primitives, arrangement, materials, cameras and lights, mesh editing, booleans, modifiers, UVs and files, organic shapes, small scenes), each a request in plain words, checks on the scene the agent exports (sizes, bounds, volumes, face counts, materials, modifiers, camera aim, symmetry, files) and a reference solution. `node eval/agent/selfcheck.mjs` replays every reference solution and checks that an empty scene fails every task; it runs in CI. `node eval/agent/run.mjs --models sonnet,opus` gives each task to a fresh headless Claude Code session whose only tools are a Zender server confined to a temporary directory, scores the result and writes `results.jsonl` and `summary.md`. Each run is a paid session (Sonnet about $0.03–0.13 a task, Opus about $0.3).
 
 Checks run by hand during P0:
 
@@ -120,9 +122,9 @@ Measured on a phone (MediaTek Dimensity 9400, 8 cores, ReleaseSafe). The TRD's t
 | `render.preview` 512×512, 1.3 M triangles | 140 ms first, ~84 ms after | ≤ 150 ms for 1 M |
 | Mesh operator on a 100,489-face grid (whole call) | extrude 105 ms, inset 110 ms, triangulate 119 ms, merge by distance 144 ms, flat UV unwrap 149 ms; individual-face extrude or inset 285 ms (5× the output), loop cut through every column 327 ms | ≤ 200 ms for a 100 k-face selection |
 | Bevel on a 50,176-face sphere | 139 ms (half the edges), 379 ms (all 100 k edges) | ≤ 200 ms |
-| UV unwrap of a 100,489-face sphere | 12.7 s (conjugate gradients converge slowly on large curved charts; needs a preconditioner) | ≤ 200 ms |
-| Binary size (ReleaseSafe, not stripped; Manifold and libc++ linked, Manifold without debug info) | 13.8 MB | ≤ 30 MB |
-| `tools/list` payload (MCP response, 44 tools) | 55.8 KB | ≤ 40 KB (hard cap raised to 60 KB) |
+| UV unwrap of a 100,489-face sphere | 4.6–4.8 s (conjugate gradients with an incomplete-Cholesky preconditioner; was 12.7 s unpreconditioned; a sparse direct solver is next) | ≤ 200 ms |
+| Binary size (ReleaseSafe, not stripped; Manifold and libc++ linked, Manifold without debug info) | 15.3 MB | ≤ 30 MB |
+| `tools/list` payload (MCP response, 45 tools) | 58.0 KB | ≤ 40 KB (hard cap raised to 60 KB) |
 | Idle RSS (`scripts/measure-memory.mjs`) | 1.5 MB | ≤ 30 MB |
 | RSS over mesh bytes, 1 M-triangle scene after a preview | 1.55× | ≤ 2.5× |
 

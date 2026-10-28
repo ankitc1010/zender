@@ -7,3 +7,4 @@ zig-out/
 !tests/golden/**/*.png
 coverage/
 zig-pkg/
+eval/agent/out/
