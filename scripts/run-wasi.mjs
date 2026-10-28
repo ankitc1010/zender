@@ -15,5 +15,11 @@ if (!file) {
 }
 const wasi = new WASI({ version: 'preview1', args: [file, ...args], env: {}, preopens: { '.': '.' }, returnOnExit: true });
 const module = await WebAssembly.compile(await readFile(file));
-const instance = await WebAssembly.instantiate(module, wasi.getImportObject());
+// Wasm calls Node 22's WASI functions as V8 fast API calls, which allocate;
+// once wasm memory growth has started a garbage collection, the next call
+// can crash Node (SIGSEGV). Called through plain functions, they take the
+// regular path.
+const imports = {};
+for (const [name, f] of Object.entries(wasi.getImportObject().wasi_snapshot_preview1)) imports[name] = (...a) => f(...a);
+const instance = await WebAssembly.instantiate(module, { wasi_snapshot_preview1: imports });
 exit(wasi.start(instance));
