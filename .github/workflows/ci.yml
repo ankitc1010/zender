@@ -83,14 +83,17 @@ jobs:
       - name: Memory targets (NFR-5)
         if: matrix.os == 'ubuntu-latest'
         run: node scripts/measure-memory.mjs --check
-      - name: G1 task set self-check (reference solutions pass, an empty scene fails)
+      - name: G1 and P1.5 task sets self-check (reference solutions pass, an empty scene fails)
         if: matrix.os == 'ubuntu-latest'
         run: node eval/agent/selfcheck.mjs
+      - name: Replay the bust (G1.5)
+        if: matrix.os == 'ubuntu-latest'
+        run: ./zig-out/bin/zender run examples/bust.jsonl -o bust.glb
       - name: Khronos glTF validator
         if: matrix.os == 'ubuntu-latest'
         run: |
           npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/validator" gltf-validator@2.0.0-dev.3.10
-          node scripts/validate-gltf.mjs "$RUNNER_TEMP/validator/node_modules" dining.glb dining.gltf
+          node scripts/validate-gltf.mjs "$RUNNER_TEMP/validator/node_modules" dining.glb dining.gltf bust.glb
 
   # TRD §15: line coverage of src/core, src/geom and src/io, reported per
   # directory in the job summary; the job fails below 85% in any of them.

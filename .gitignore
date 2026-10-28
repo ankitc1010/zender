@@ -8,3 +8,4 @@ zig-out/
 coverage/
 zig-pkg/
 eval/agent/out/
+__pycache__/
