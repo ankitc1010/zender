@@ -265,6 +265,8 @@ fn bake(c: *Call) HandlerError!void {
                 try c.warn("no faces of slot {d} ('{s}') reach the UV square; {s} not baked", .{ slot, mat_name, @tagName(t.input) });
                 continue;
             }
+            if (res.overlapped * 100 > res.covered)
+                try c.warn("UV islands overlap on {d}% of the texels slot {d} ('{s}') reaches; each keeps one face's value, so unwrap with mesh.uv_unwrap first for a bake that fits every face", .{ res.overlapped * 100 / res.covered, slot, mat_name });
             const name = try std.fmt.allocPrint(c.arena, "{s}_{s}", .{ mat_name, @tagName(t.input) });
             var image: core.types.Image = .{
                 .width = @intCast(size),

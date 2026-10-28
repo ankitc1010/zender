@@ -95,6 +95,7 @@ const Primitive = struct {
     position: usize,
     normal: usize,
     uv: ?usize,
+    tangent: ?usize,
     indices: usize,
     material: ?u32,
 };
@@ -106,8 +107,8 @@ const VertKey = struct {
 };
 
 /// Splits one mesh into one primitive per material slot with deduplicated
-/// (vertex, normal, uv) corners.
-fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u32, report: *Report) Allocator.Error![]Primitive {
+/// (vertex, normal, uv) corners; slots with a normal map get tangents.
+fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u32, materials: []const ir.Material, report: *Report) Allocator.Error![]Primitive {
     const n_faces = m.faceCount();
     var max_slot: usize = 0;
     for (m.face_material) |s| max_slot = @max(max_slot, s);
@@ -166,6 +167,13 @@ fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u
             const uvv = try bb.addView(std.mem.sliceAsBytes(uvs.items), 34962);
             ua = try bb.addAccessor(.{ .view = uvv, .component = 5126, .count = uvs.items.len, .type = "VEC2" });
         }
+        var ta: ?usize = null;
+        const mat = if (slot < slots.len) slots[slot] else null;
+        if (has_uv and mat != null and materials[mat.?].normal_image != null) {
+            const tan = try tangents(arena, pos.items, nor.items, uvs.items, idx.items);
+            const tv = try bb.addView(std.mem.sliceAsBytes(tan), 34962);
+            ta = try bb.addAccessor(.{ .view = tv, .component = 5126, .count = tan.len, .type = "VEC4" });
+        }
         var ia: usize = undefined;
         if (pos.items.len <= 65535) {
             const small = try arena.alloc(u16, idx.items.len);
@@ -180,11 +188,53 @@ fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u
             .position = pa,
             .normal = na,
             .uv = ua,
+            .tangent = ta,
             .indices = ia,
             .material = if (slot < slots.len) slots[slot] else null,
         });
     }
     return prims.items;
+}
+
+/// Per-vertex tangents (xyz unit, w the handedness) in the frame
+/// material.bake writes normal maps in: each triangle's direction of +u,
+/// with +v (Blender's, up the image) as the bitangent, summed per vertex
+/// and made orthogonal to the normal.
+fn tangents(arena: Allocator, pos: []const Vec3, nor: []const Vec3, uvs: []const [2]f32, idx: []const u32) Allocator.Error![][4]f32 {
+    const t_sum = try arena.alloc(Vec3, pos.len);
+    @memset(t_sum, .{ 0, 0, 0 });
+    const b_sum = try arena.alloc(Vec3, pos.len);
+    @memset(b_sum, .{ 0, 0, 0 });
+    var i: usize = 0;
+    while (i + 2 < idx.len) : (i += 3) {
+        const k = idx[i .. i + 3];
+        const e1 = v.sub(pos[k[1]], pos[k[0]]);
+        const e2 = v.sub(pos[k[2]], pos[k[0]]);
+        // The exported v runs down the image; the bake's runs up.
+        const du1 = uvs[k[1]][0] - uvs[k[0]][0];
+        const dv1 = uvs[k[0]][1] - uvs[k[1]][1];
+        const du2 = uvs[k[2]][0] - uvs[k[0]][0];
+        const dv2 = uvs[k[0]][1] - uvs[k[2]][1];
+        const det = du1 * dv2 - du2 * dv1;
+        if (@abs(det) < 1e-20) continue;
+        const t = v.scale(v.sub(v.scale(e1, dv2), v.scale(e2, dv1)), 1 / det);
+        const b = v.scale(v.sub(v.scale(e2, du1), v.scale(e1, du2)), 1 / det);
+        for (k) |x| {
+            t_sum[x] = v.add(t_sum[x], t);
+            b_sum[x] = v.add(b_sum[x], b);
+        }
+    }
+    const out = try arena.alloc([4]f32, pos.len);
+    for (out, nor, t_sum, b_sum) |*o, n, ts, bs| {
+        var t = v.sub(ts, v.scale(n, v.dot(ts, n)));
+        if (v.length(t) < 1e-12) {
+            const a: Vec3 = if (@abs(n[0]) < 0.9) .{ 1, 0, 0 } else .{ 0, 1, 0 };
+            t = v.cross(a, n);
+        }
+        t = v.normalize(t);
+        o.* = .{ t[0], t[1], t[2], if (v.dot(v.cross(n, t), bs) < 0) -1 else 1 };
+    }
+    return out;
 }
 
 fn f32Array(w: *Stringify, xs: []const f32) !void {
@@ -245,7 +295,7 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
         if (n.kind != .mesh) continue;
         const mi = n.kind.mesh;
         if (mesh_out[mi] != null) continue;
-        const prims = try writeMesh(arena, &bb, scene.meshes[mi], n.materials, &report);
+        const prims = try writeMesh(arena, &bb, scene.meshes[mi], n.materials, scene.materials, &report);
         mesh_out[mi] = @intCast(mesh_prims.items.len);
         try mesh_prims.append(arena, prims);
         try mesh_names.append(arena, scene.meshes[mi].name);
@@ -465,6 +515,10 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
                 if (p.uv) |u| {
                     try w.objectField("TEXCOORD_0");
                     try w.write(u);
+                }
+                if (p.tangent) |t| {
+                    try w.objectField("TANGENT");
+                    try w.write(t);
                 }
                 try w.endObject();
                 try w.objectField("indices");

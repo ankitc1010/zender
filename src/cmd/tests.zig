@@ -837,6 +837,16 @@ test "material.bake turns recipes into images that glTF carries as textures" {
     try testing.expect(pbr.get("baseColorTexture") != null and pbr.get("metallicRoughnessTexture") != null);
     try testing.expectEqual(@as(f64, 1), schemaNumber(pbr.get("roughnessFactor").?));
     try testing.expect(gltf.object.get("materials").?.array.items[0].object.get("normalTexture") != null);
+    // Tubes of two splines share the UV square: the bake says so.
+    _ = try f.ok("curve.add", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Sticks\",\"bevel_depth\":0.05,\"material\":\"Camo\",\"splines\":[{{\"points\":[[0,0,0],[1,0,0]]}},{{\"points\":[[0,1,0],[1,1,0]]}}]}}", .{id}));
+    _ = try f.ok("curve.to_mesh", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Sticks\"}}", .{id}));
+    const over = try f.ok("material.bake", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Sticks\",\"inputs\":[\"base_color\"],\"size\":32}}", .{id}));
+    try testing.expect(std.mem.indexOf(u8, over.object.get("warnings").?.array.items[0].string, "overlap") != null);
+    _ = try f.ok("object.delete", try f.fmt("{{\"scene_id\":\"{s}\",\"objects\":[\"Sticks\"]}}", .{id}));
+    // The normal map comes with the tangents it was baked in.
+    const attrs = gltf.object.get("meshes").?.array.items[0].object.get("primitives").?.array.items[0].object.get("attributes").?.object;
+    const tangent = gltf.object.get("accessors").?.array.items[@intCast(attrs.get("TANGENT").?.integer)].object;
+    try testing.expectEqualStrings("VEC4", tangent.get("type").?.string);
 }
 
 test "angle properties take degrees within their range" {

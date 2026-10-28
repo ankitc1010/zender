@@ -34,6 +34,9 @@ pub const Result = struct {
     pixels: [][4]f32,
     /// Texels covered by faces (before the margin).
     covered: usize,
+    /// Of those, texels more than one face reaches (overlapping UVs); each
+    /// keeps the first face's value.
+    overlapped: usize = 0,
 };
 
 const Point = struct { p: Vec3, n: Vec3, uv: [2]f32 };
@@ -82,8 +85,15 @@ pub fn bake(gpa: Allocator, m: *const Mesh, recipe: *const Recipe, input: Input,
     const filled = try gpa.alloc(bool, pixels.len);
     defer gpa.free(filled);
     @memset(filled, false);
+    // Which face filled each texel, and whether another face reached it too.
+    const owner = try gpa.alloc(u32, pixels.len);
+    defer gpa.free(owner);
+    const twice = try gpa.alloc(bool, pixels.len);
+    defer gpa.free(twice);
+    @memset(twice, false);
     @memset(pixels, opts.background);
     var covered: usize = 0;
+    var overlapped: usize = 0;
     const wf: f32 = @floatFromInt(w);
     const hf: f32 = @floatFromInt(h);
 
@@ -119,7 +129,14 @@ pub fn bake(gpa: Allocator, m: *const Mesh, recipe: *const Recipe, input: Input,
                 const eps = -1e-5;
                 if (b0 < eps or b1 < eps or b2 < eps) continue;
                 const idx = py * w + px;
-                if (filled[idx]) continue;
+                if (filled[idx]) {
+                    if (owner[idx] != f and !twice[idx]) {
+                        twice[idx] = true;
+                        overlapped += 1;
+                    }
+                    continue;
+                }
+                owner[idx] = @intCast(f);
                 const pt: Point = .{
                     .p = v.add(v.add(v.scale(tri[0].p, b0), v.scale(tri[1].p, b1)), v.scale(tri[2].p, b2)),
                     .n = v.normalize(v.add(v.add(v.scale(tri[0].n, b0), v.scale(tri[1].n, b1)), v.scale(tri[2].n, b2))),
@@ -132,7 +149,7 @@ pub fn bake(gpa: Allocator, m: *const Mesh, recipe: *const Recipe, input: Input,
         }
     }
     try dilate(gpa, pixels, filled, w, h, opts.margin);
-    return .{ .pixels = pixels, .covered = covered };
+    return .{ .pixels = pixels, .covered = covered, .overlapped = overlapped };
 }
 
 const Frame = struct { t: Vec3, b: Vec3 };
