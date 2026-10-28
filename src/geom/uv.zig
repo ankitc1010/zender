@@ -363,9 +363,14 @@ fn flatten(c: *Ctx, faces: []const u32, seams: ?*const std.DynamicBitSetUnmanage
 }
 
 /// Minimises the conformal energy Σ |Σ_j W_j (u_j + i v_j)|² / 2A over the
-/// chart's triangles with the two pinned slots fixed, by conjugate
-/// gradients on the least-squares problem (CGLS). `uv` holds the starting
-/// point and receives the result.
+/// chart's triangles with the two pinned slots fixed. The normal equations
+/// M x = b (M = AᵀA over the free slots, u and v interleaved) are
+/// assembled once and solved by conjugate gradients preconditioned with an
+/// incomplete Cholesky factor of M (IC(0), on M's own sparsity), from the
+/// projection in `uv`, which receives the result. The residual stops at
+/// 1e-6 of the right-hand side, far below a texel. Plain CG needed several
+/// times more iterations on large curved charts; a sparse direct solver
+/// (nested-dissection Cholesky) would be faster still and is the next step.
 fn lscm(c: *Ctx, tris: []const Tri, uv: [][2]f64, pins: [2]u32) Error!void {
     const gpa = c.gpa;
     const n = uv.len;
@@ -382,90 +387,278 @@ fn lscm(c: *Ctx, tris: []const Tri, uv: [][2]f64, pins: [2]u32) Error!void {
             w[j] = .{ (b[0] - a[0]) * s, (b[1] - a[1]) * s };
         }
     }
-    const pinned = struct {
-        fn is(p: [2]u32, i: u32) bool {
-            return i == p[0] or i == p[1];
+    // Free slots get consecutive indices; the system has two rows each.
+    const none_: u32 = std.math.maxInt(u32);
+    const free = try gpa.alloc(u32, n);
+    defer gpa.free(free);
+    var nf: u32 = 0;
+    for (free, 0..) |*f, i| {
+        if (i == pins[0] or i == pins[1]) {
+            f.* = none_;
+        } else {
+            f.* = nf;
+            nf += 1;
         }
-    }.is;
-
-    const x = try gpa.alloc(f64, 2 * n);
-    defer gpa.free(x);
-    for (uv, 0..) |w, i| {
-        x[2 * i] = w[0];
-        x[2 * i + 1] = w[1];
     }
-    const r = try gpa.alloc(f64, 2 * tris.len);
-    defer gpa.free(r);
-    const q = try gpa.alloc(f64, 2 * tris.len);
-    defer gpa.free(q);
-    const s = try gpa.alloc(f64, 2 * n);
-    defer gpa.free(s);
-    const p = try gpa.alloc(f64, 2 * n);
-    defer gpa.free(p);
+    if (nf == 0) return;
+    var m = try Sparse.assemble(gpa, tris, coef, free, nf);
+    defer m.deinit(gpa);
 
-    const Ops = struct {
-        /// out = A·vec, all slots (pinned included).
-        fn apply(ts: []const Tri, cf: []const [3][2]f64, vec: []const f64, out: []f64) void {
-            for (ts, cf, 0..) |t, w, i| {
-                var re: f64 = 0;
-                var im: f64 = 0;
-                for (0..3) |j| {
-                    const u = vec[2 * t.s[j]];
-                    const vv = vec[2 * t.s[j] + 1];
-                    re += w[j][0] * u - w[j][1] * vv;
-                    im += w[j][1] * u + w[j][0] * vv;
-                }
-                out[2 * i] = re;
-                out[2 * i + 1] = im;
-            }
-        }
-        /// out = Aᵀ·vec over free slots (pinned entries zero).
-        fn applyT(ts: []const Tri, cf: []const [3][2]f64, vec: []const f64, out: []f64, pn: [2]u32) void {
-            @memset(out, 0);
-            for (ts, cf, 0..) |t, w, i| {
-                const re = vec[2 * i];
-                const im = vec[2 * i + 1];
-                for (0..3) |j| {
-                    const k = t.s[j];
-                    if (k == pn[0] or k == pn[1]) continue;
-                    out[2 * k] += w[j][0] * re + w[j][1] * im;
-                    out[2 * k + 1] += -w[j][1] * re + w[j][0] * im;
-                }
-            }
+    // Right-hand side from the pinned slots: b = -M_fp x_p.
+    const dim = 2 * @as(usize, nf);
+    const b = try gpa.alloc(f64, dim);
+    defer gpa.free(b);
+    @memset(b, 0);
+    for (tris, coef) |t, w| for (0..3) |j| {
+        const fj = free[t.s[j]];
+        if (fj == none_) continue;
+        for (0..3) |k| {
+            if (free[t.s[k]] != none_) continue;
+            const blk = block(w[j], w[k]);
+            const xu = uv[t.s[k]][0];
+            const xv = uv[t.s[k]][1];
+            b[2 * fj] -= blk[0] * xu + blk[1] * xv;
+            b[2 * fj + 1] -= -blk[1] * xu + blk[0] * xv;
         }
     };
-    // r = b - A x with b = 0 (the pinned values are inside x).
-    Ops.apply(tris, coef, x, r);
-    for (r) |*e| e.* = -e.*;
-    Ops.applyT(tris, coef, r, s, pins);
-    @memcpy(p, s);
-    var gamma = dot(s, s);
-    const gamma0 = gamma;
-    // Stop once the energy left is negligible next to the coordinates (a
-    // chart that is already flat starts there), or the gradient has fallen
-    // a millionfold.
-    const settled = 1e-14 * dot(x, x);
-    const max_iter = 200 + 20 * std.math.sqrt(n);
+
+    const x = try gpa.alloc(f64, dim);
+    defer gpa.free(x);
+    for (free, 0..) |f, i| if (f != none_) {
+        x[2 * f] = uv[i][0];
+        x[2 * f + 1] = uv[i][1];
+    };
+    var l = try m.incompleteCholesky(gpa);
+    defer l.deinit(gpa);
+
+    const r = try gpa.alloc(f64, dim);
+    defer gpa.free(r);
+    const z = try gpa.alloc(f64, dim);
+    defer gpa.free(z);
+    const p = try gpa.alloc(f64, dim);
+    defer gpa.free(p);
+    const q = try gpa.alloc(f64, dim);
+    defer gpa.free(q);
+    m.mul(x, r);
+    for (r, b) |*ri, bi| ri.* = bi - ri.*;
+    const b_norm = @sqrt(dot(b, b)) + @sqrt(dot(x, x)) * 1e-30;
+    l.solve(r, z);
+    @memcpy(p, z);
+    var rz = dot(r, z);
+    const max_iter = 50 + 4 * std.math.sqrt(dim);
     var it: usize = 0;
-    while (it < max_iter and gamma > 1e-12 * gamma0 and dot(r, r) > settled) : (it += 1) {
+    while (it < max_iter) : (it += 1) {
         try c.tick();
-        Ops.apply(tris, coef, p, q);
-        const qq = dot(q, q);
-        if (qq == 0) break;
-        const alpha = gamma / qq;
-        for (x, p, 0..) |*xi, pi, i| {
-            if (pinned(pins, @intCast(i / 2))) continue;
-            xi.* += alpha * pi;
-        }
+        if (@sqrt(dot(r, r)) <= 1e-6 * @max(b_norm, 1e-300)) break;
+        m.mul(p, q);
+        const pq = dot(p, q);
+        if (pq <= 0) break;
+        const alpha = rz / pq;
+        for (x, p) |*xi, pi| xi.* += alpha * pi;
         for (r, q) |*ri, qi| ri.* -= alpha * qi;
-        Ops.applyT(tris, coef, r, s, pins);
-        const g2 = dot(s, s);
-        const beta = g2 / gamma;
-        gamma = g2;
-        for (p, s) |*pi, si| pi.* = si + beta * pi.*;
+        l.solve(r, z);
+        const rz2 = dot(r, z);
+        const beta = rz2 / rz;
+        rz = rz2;
+        for (p, z) |*pi, zi| pi.* = zi + beta * pi.*;
     }
-    for (uv, 0..) |*w, i| w.* = .{ x[2 * i], x[2 * i + 1] };
+    for (free, 0..) |f, i| if (f != none_) {
+        uv[i] = .{ x[2 * f], x[2 * f + 1] };
+    };
 }
+
+/// The 2x2 block of AᵀA coupling slots j and k: [[a, b], [-b, a]], from
+/// their complex coefficients.
+fn block(cj: [2]f64, ck: [2]f64) [2]f64 {
+    return .{ cj[0] * ck[0] + cj[1] * ck[1], cj[1] * ck[0] - cj[0] * ck[1] };
+}
+
+/// A symmetric matrix as its lower triangle in compressed rows, columns
+/// ascending, the diagonal last in each row.
+const Sparse = struct {
+    start: []u32,
+    col: []u32,
+    val: []f64,
+
+    fn deinit(m: *Sparse, gpa: Allocator) void {
+        gpa.free(m.start);
+        gpa.free(m.col);
+        gpa.free(m.val);
+    }
+
+    fn assemble(gpa: Allocator, tris: []const Tri, coef: []const [3][2]f64, free: []const u32, nf: u32) Allocator.Error!Sparse {
+        const none_: u32 = std.math.maxInt(u32);
+        const dim = 2 * @as(usize, nf);
+        // Slot pairs that share a triangle, lower triangle (J >= K).
+        var pairs: std.ArrayList(u64) = .empty;
+        defer pairs.deinit(gpa);
+        for (tris) |t| for (0..3) |j| for (0..3) |k| {
+            const fj = free[t.s[j]];
+            const fk = free[t.s[k]];
+            if (fj == none_ or fk == none_ or fj < fk) continue;
+            try pairs.append(gpa, @as(u64, fj) << 32 | fk);
+        };
+        std.mem.sort(u64, pairs.items, {}, std.sort.asc(u64));
+        var u: usize = 0;
+        for (pairs.items) |x| {
+            if (u > 0 and pairs.items[u - 1] == x) continue;
+            pairs.items[u] = x;
+            u += 1;
+        }
+        pairs.items.len = u;
+        // Entries per row of the 2nf system: a block pair (J > K) gives
+        // two entries to each of rows 2J and 2J+1; a diagonal block gives
+        // (2J, 2J) and (2J+1, 2J), (2J+1, 2J+1).
+        const start = try gpa.alloc(u32, dim + 1);
+        errdefer gpa.free(start);
+        @memset(start, 0);
+        for (pairs.items) |x| {
+            const jj: usize = @intCast(x >> 32);
+            const kk: usize = @intCast(x & 0xffffffff);
+            if (jj == kk) {
+                start[2 * jj + 1] += 1;
+                start[2 * jj + 2] += 2;
+            } else {
+                start[2 * jj + 1] += 2;
+                start[2 * jj + 2] += 2;
+            }
+        }
+        for (1..start.len) |i| start[i] += start[i - 1];
+        const nnz = start[dim];
+        const col = try gpa.alloc(u32, nnz);
+        errdefer gpa.free(col);
+        const val = try gpa.alloc(f64, nnz);
+        errdefer gpa.free(val);
+        @memset(val, 0);
+        const fill = try gpa.dupe(u32, start[0..dim]);
+        defer gpa.free(fill);
+        // Pairs are sorted by (J, K), so columns come out ascending.
+        for (pairs.items) |x| {
+            const jj: u32 = @intCast(x >> 32);
+            const kk: u32 = @intCast(x & 0xffffffff);
+            if (jj == kk) {
+                col[fill[2 * jj]] = 2 * jj;
+                fill[2 * jj] += 1;
+                col[fill[2 * jj + 1]] = 2 * jj;
+                col[fill[2 * jj + 1] + 1] = 2 * jj + 1;
+                fill[2 * jj + 1] += 2;
+            } else {
+                for ([2]u32{ 2 * jj, 2 * jj + 1 }) |row| {
+                    col[fill[row]] = 2 * kk;
+                    col[fill[row] + 1] = 2 * kk + 1;
+                    fill[row] += 2;
+                }
+            }
+        }
+        var m: Sparse = .{ .start = start, .col = col, .val = val };
+        for (tris, coef) |t, w| for (0..3) |j| for (0..3) |k| {
+            const fj = free[t.s[j]];
+            const fk = free[t.s[k]];
+            if (fj == none_ or fk == none_ or fj < fk) continue;
+            const blk = block(w[j], w[k]);
+            if (fj == fk) {
+                m.add(2 * fj, 2 * fj, blk[0]);
+                m.add(2 * fj + 1, 2 * fj + 1, blk[0]);
+            } else {
+                m.add(2 * fj, 2 * fk, blk[0]);
+                m.add(2 * fj, 2 * fk + 1, blk[1]);
+                m.add(2 * fj + 1, 2 * fk, -blk[1]);
+                m.add(2 * fj + 1, 2 * fk + 1, blk[0]);
+            }
+        };
+        return m;
+    }
+
+    fn find(m: *const Sparse, row: usize, c: u32) usize {
+        const cols = m.col[m.start[row]..m.start[row + 1]];
+        var lo: usize = 0;
+        var hi: usize = cols.len;
+        while (lo < hi) {
+            const mid = (lo + hi) / 2;
+            if (cols[mid] < c) lo = mid + 1 else hi = mid;
+        }
+        return m.start[row] + lo;
+    }
+
+    fn add(m: *Sparse, row: usize, c: u32, x: f64) void {
+        m.val[m.find(row, c)] += x;
+    }
+
+    /// y = M x, with M symmetric and stored as its lower triangle.
+    fn mul(m: *const Sparse, x: []const f64, y: []f64) void {
+        @memset(y, 0);
+        for (0..y.len) |i| {
+            for (m.start[i]..m.start[i + 1]) |e| {
+                const j = m.col[e];
+                y[i] += m.val[e] * x[j];
+                if (j != i) y[j] += m.val[e] * x[i];
+            }
+        }
+    }
+
+    /// IC(0): L with L Lᵀ ≈ M on M's sparsity. A pivot that is not positive
+    /// restarts the factorisation with the diagonal raised a little.
+    fn incompleteCholesky(m: *const Sparse, gpa: Allocator) Allocator.Error!Sparse {
+        const dim = m.start.len - 1;
+        var l: Sparse = .{ .start = try gpa.dupe(u32, m.start), .col = try gpa.dupe(u32, m.col), .val = try gpa.alloc(f64, m.val.len) };
+        errdefer l.deinit(gpa);
+        var shift: f64 = 0;
+        attempt: while (true) {
+            @memcpy(l.val, m.val);
+            for (0..dim) |i| l.val[l.start[i + 1] - 1] *= 1 + shift;
+            for (0..dim) |i| {
+                const ri = l.start[i];
+                const re = l.start[i + 1];
+                for (ri..re) |e| {
+                    const k = l.col[e];
+                    // Σ_m L_im L_km over the columns both rows hold, m < k.
+                    var sum: f64 = 0;
+                    var a = ri;
+                    var bpos: usize = l.start[k];
+                    const bend = l.start[k + 1] - 1;
+                    while (a < e and bpos < bend) {
+                        const ca = l.col[a];
+                        const cb = l.col[bpos];
+                        if (ca == cb) {
+                            sum += l.val[a] * l.val[bpos];
+                            a += 1;
+                            bpos += 1;
+                        } else if (ca < cb) a += 1 else bpos += 1;
+                    }
+                    if (k == i) {
+                        const d = l.val[e] - sum;
+                        if (!(d > 0)) {
+                            shift = if (shift == 0) 1e-3 else shift * 10;
+                            continue :attempt;
+                        }
+                        l.val[e] = @sqrt(d);
+                    } else {
+                        l.val[e] = (l.val[e] - sum) / l.val[l.start[k + 1] - 1];
+                    }
+                }
+            }
+            return l;
+        }
+    }
+
+    /// z = (L Lᵀ)⁻¹ r.
+    fn solve(l: *const Sparse, r: []const f64, z: []f64) void {
+        const dim = z.len;
+        for (0..dim) |i| {
+            var s = r[i];
+            const diag = l.start[i + 1] - 1;
+            for (l.start[i]..diag) |e| s -= l.val[e] * z[l.col[e]];
+            z[i] = s / l.val[diag];
+        }
+        var i = dim;
+        while (i > 0) {
+            i -= 1;
+            const diag = l.start[i + 1] - 1;
+            z[i] /= l.val[diag];
+            for (l.start[i]..diag) |e| z[l.col[e]] -= l.val[e] * z[i];
+        }
+    }
+};
 
 fn dot(a: []const f64, b: []const f64) f64 {
     var t: f64 = 0;
