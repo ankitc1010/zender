@@ -463,6 +463,10 @@ pub const Material = struct {
     roughness_image: ?IdHandle = null,
     normal_image: ?IdHandle = null,
     emission_image: ?IdHandle = null,
+    /// Colour attribute of the mesh driving base colour (Blender's Color
+    /// Attribute node), or empty. A baked base_color_image takes
+    /// precedence; meshes without the attribute show base_color.
+    base_color_attribute: Name = .{},
 
     pub const props = [_]Prop{
         .{ .name = "base_color", .field = "base_color", .kind = .color4, .unit = .factor, .min = 0, .max = 1, .doc = "Base colour, scene-linear RGBA" },

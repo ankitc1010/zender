@@ -743,6 +743,40 @@ test "mesh.from_sdf models blended shapes with slots and precise errors" {
     try testing.expectEqualStrings("/voxel_size", huge.tool_error.path);
 }
 
+test "mesh.from_sdf step colours reach glTF as COLOR_0 through a material that reads them" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    const clay = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Clay\",\"properties\":{{\"roughness\":0.6,\"base_color\":{{\"attribute\":\"Color\"}}}}}}", .{id}));
+    try testing.expectEqualStrings("Color", clay.object.get("base_color_attribute").?.string);
+    const bad_attr = try f.call("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"properties\":{{\"base_color\":{{\"attribute\":3}}}}}}", .{id}));
+    try testing.expectEqualStrings("/properties/base_color/attribute", bad_attr.tool_error.path);
+    const bad_col = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"steps\":[{{\"color\":[1,0],\"shape\":{{\"type\":\"sphere\",\"radius\":1}}}}]}}", .{id}));
+    try testing.expectEqualStrings("/steps/0/color", bad_col.tool_error.path);
+
+    _ = try f.ok("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Blob\",\"voxel_size\":0.1,\"material\":\"Clay\",\"steps\":[{{\"color\":[1,0,0],\"shape\":{{\"type\":\"sphere\",\"radius\":0.5,\"location\":[-0.3,0,0]}}}},{{\"blend\":0.2,\"color\":[0,0,1],\"shape\":{{\"type\":\"sphere\",\"radius\":0.5,\"location\":[0.3,0,0]}}}}]}}", .{id}));
+    // A mesh without the attribute shows the material's base_color.
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\",\"location\":[3,0,0],\"material\":\"Clay\"}}", .{id}));
+    _ = try f.ok("render.preview", try f.fmt("{{\"scene_id\":\"{s}\",\"width\":64,\"height\":48}}", .{id}));
+    _ = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"blob.gltf\"}}", .{id}));
+    const text = try f.tmp.dir.readFileAlloc(testing.io, "blob.gltf", f.arena_state.allocator(), .limited(1 << 24));
+    const gltf = try std.json.parseFromSliceLeaky(Value, f.arena_state.allocator(), text, .{});
+    const pbr = gltf.object.get("materials").?.array.items[0].object.get("pbrMetallicRoughness").?.object;
+    for (pbr.get("baseColorFactor").?.array.items) |x| try testing.expectEqual(@as(f64, 1), schemaNumber(x));
+    for (gltf.object.get("meshes").?.array.items) |m| {
+        const attrs = m.object.get("primitives").?.array.items[0].object.get("attributes").?.object;
+        const acc = gltf.object.get("accessors").?.array.items[@intCast(attrs.get("COLOR_0").?.integer)].object;
+        try testing.expectEqualStrings("VEC4", acc.get("type").?.string);
+    }
+    // A plain colour replaces the attribute, and COLOR_0 goes away.
+    const plain = try f.ok("material.update", try f.fmt("{{\"scene_id\":\"{s}\",\"material\":\"Clay\",\"properties\":{{\"base_color\":[0.5,0.5,0.5,1]}}}}", .{id}));
+    try testing.expect(plain.object.get("base_color_attribute") == null);
+    _ = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"grey.gltf\"}}", .{id}));
+    const grey = try f.tmp.dir.readFileAlloc(testing.io, "grey.gltf", f.arena_state.allocator(), .limited(1 << 24));
+    try testing.expect(std.mem.indexOf(u8, grey, "COLOR_0") == null);
+}
+
 test "curve.add sweeps tubes, edits settings, exports and converts" {
     var f: Fixture = undefined;
     try f.init();

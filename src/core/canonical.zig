@@ -179,6 +179,10 @@ pub fn write(arena: Allocator, doc: *Document, w: *Stringify, opts: Options) Err
             try w.objectField("textures");
             try m.writeTextures(w);
         }
+        if (m.base_color_attribute.len > 0) {
+            try w.objectField("base_color_attribute");
+            try w.write(m.base_color_attribute.slice());
+        }
         inline for (std.meta.fields(types.TextureInput)) |f| {
             const input: types.TextureInput = @enumFromInt(f.value);
             if (input.imageOf(m)) |ih| {

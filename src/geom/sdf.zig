@@ -1,6 +1,10 @@
 //! Implicit modelling for mesh.from_sdf: a program of signed-distance
 //! shapes combined with smooth booleans, sampled on a voxel grid and turned
-//! into quads with surface nets. Distances are negative inside.
+//! into quads with surface nets. Distances are negative inside. Steps can
+//! carry a material slot (per face, a hard border) or a colour: once any
+//! step has one, every step paints its surface (uncoloured ones with the
+//! base colour), the colours fade across blends like the surfaces do, and
+//! the mesh gets them as a point colour attribute.
 //!
 //! Each step touches only the cells near its shape (its bounds grown by the
 //! blend radius and a margin), so thousands of small shapes, such as the
@@ -58,6 +62,12 @@ pub const Step = struct {
     offset: f32 = 0,
     /// Material slot of the surface this step contributes.
     slot: ?u8 = null,
+    /// Scene-linear colour of the surface this step contributes; null =
+    /// the base colour.
+    color: ?[3]f32 = null,
+    /// Width (m) the colour fades over; null = `blend`. Never under one
+    /// voxel, so borders stay smooth lines rather than steps.
+    color_blend: ?f32 = null,
     /// Push the shape's surface out by amount x (texture - 0.5), the
     /// texture read at the program-space point.
     displace: ?*const math.texture.Recipe = null,
@@ -72,12 +82,16 @@ pub const Options = struct {
     max_cells: u64 = 64 << 20,
     /// Taubin passes after meshing; 0 = none.
     smooth_iterations: u32 = 0,
+    /// Point colour attribute written when steps set colours.
+    color_attribute: []const u8 = "Color",
+    /// Colour of the steps without one, as slot 0 is for slots.
+    base_color: [3]f32 = .{ 1, 1, 1 },
     pool: ?math.Pool = null,
     /// Tests only: evaluate chains segment by segment in every cell.
     naive_chains: bool = false,
 };
 
-pub const Error = Allocator.Error || math.DeadlineError || build.BuildError || error{ TooManyCells, Unbounded, InvalidParameter, Empty };
+pub const Error = Allocator.Error || math.DeadlineError || build.BuildError || error{ TooManyCells, Unbounded, InvalidParameter, Empty, TooManyAttributes };
 
 const big: f32 = 1e6;
 
@@ -241,6 +255,14 @@ fn usesSlots(steps: []const Step) bool {
     return false;
 }
 
+fn usesColors(steps: []const Step) bool {
+    for (steps) |st| {
+        if (st.color != null) return true;
+        if (st.body == .group and usesColors(st.body.group)) return true;
+    }
+    return false;
+}
+
 pub const Grid = struct {
     origin: Vec3,
     voxel: f32,
@@ -273,28 +295,47 @@ pub const Grid = struct {
     }
 };
 
-/// A field plus, when the program uses slots, the slot that won each cell.
+/// A field plus, when the program uses slots, the slot that won each cell
+/// and, when it uses colours, each cell's colour (half floats keep a large
+/// grid affordable).
 const Field = struct {
     d: []f32,
     slot: []u8,
+    col: [][3]f16,
+    /// The colour of steps without one, and of cells no step reached.
+    base: [3]f32,
+    /// Narrowest colour fade: one voxel.
+    min_fade: f32,
 
-    fn init(gpa: Allocator, n: usize, slots: bool) Allocator.Error!Field {
+    fn init(gpa: Allocator, n: usize, slots: bool, colors: bool, base: [3]f32, min_fade: f32) Allocator.Error!Field {
         const d = try gpa.alloc(f32, n);
+        errdefer gpa.free(d);
         @memset(d, big);
         const s = try gpa.alloc(u8, if (slots) n else 0);
+        errdefer gpa.free(s);
         @memset(s, 0);
-        return .{ .d = d, .slot = s };
+        const col = try gpa.alloc([3]f16, if (colors) n else 0);
+        @memset(col, .{ @floatCast(base[0]), @floatCast(base[1]), @floatCast(base[2]) });
+        return .{ .d = d, .slot = s, .col = col, .base = base, .min_fade = min_fade };
     }
     fn deinit(f: Field, gpa: Allocator) void {
         gpa.free(f.d);
         gpa.free(f.slot);
+        gpa.free(f.col);
     }
 };
 
-/// Combines value `s` (slot `sl`) into cell `c` of `f` by `op`.
-inline fn combine(f: Field, c: usize, op: Op, k: f32, s: f32, sl: ?u8) void {
+fn colorOf(c: [3]f16) [3]f32 {
+    return .{ c[0], c[1], c[2] };
+}
+
+/// Combines value `s` (slot `sl`, colour `cl`, null = the base colour) into
+/// cell `c` of `f` by the op of step `st`.
+inline fn combine(f: Field, c: usize, st: Step, s: f32, sl: ?u8, cl: ?[3]f32) void {
     const old = f.d[c];
-    switch (op) {
+    const k = st.blend;
+    if (f.col.len > 0) blendColor(f, c, st.op, @max(st.color_blend orelse k, f.min_fade), old, s, cl orelse f.base);
+    switch (st.op) {
         .add => {
             f.d[c] = smin(old, s, k);
             if (sl) |x| if (f.slot.len > 0 and s < old) {
@@ -311,12 +352,30 @@ inline fn combine(f: Field, c: usize, op: Op, k: f32, s: f32, sl: ?u8) void {
     }
 }
 
+/// Mixes colour `x` into cell `c` by the share the new shape has in the
+/// boolean, ramping over fade width `k` as a smooth blend of that radius
+/// weighs its two sides. With `k` the blend radius, colours fade across a
+/// blend as the surfaces do.
+fn blendColor(f: Field, c: usize, op: Op, k: f32, old: f32, s: f32, x: [3]f32) void {
+    // How far the new value beats the old one.
+    const lead = switch (op) {
+        .add => old - s,
+        .subtract => -s - old,
+        .intersect => s - old,
+    };
+    const w = std.math.clamp(0.5 + 0.5 * lead / k, 0, 1);
+    if (w == 0) return;
+    const prev = colorOf(f.col[c]);
+    for (0..3) |i| f.col[c][i] = @floatCast(prev[i] + (x[i] - prev[i]) * w);
+}
+
 const Eval = struct {
     gpa: Allocator,
     grid: Grid,
     pool: ?math.Pool,
     margin: f32,
     slots: bool,
+    colors: bool,
     naive_chains: bool = false,
 
     /// Applies `steps` to `f`.
@@ -324,7 +383,7 @@ const Eval = struct {
         for (steps) |st| switch (st.body) {
             .shape => |s| try e.shapeStep(f, st, s),
             .group => |g| {
-                const tmp = try Field.init(e.gpa, f.d.len, e.slots);
+                const tmp = try Field.init(e.gpa, f.d.len, e.slots, e.colors, f.base, f.min_fade);
                 defer tmp.deinit(e.gpa);
                 try e.run(tmp, g);
                 var b: ?[2]Vec3 = null;
@@ -397,7 +456,7 @@ const Eval = struct {
                 if (cx.st.displace) |tex| if (t < big) {
                     t -= cx.st.displace_amount * (tex.scalar(g.point(i, j, k)) - 0.5);
                 };
-                combine(cx.f, g.index(i, j, k), cx.st.op, cx.st.blend, t, cx.st.slot);
+                combine(cx.f, g.index(i, j, k), cx.st, t, cx.st.slot, cx.st.color);
             }
         };
         const ctx: Ctx = .{ .segs = segs, .tmp = tmp, .r = r, .dims = dims, .f = f, .st = st };
@@ -476,7 +535,7 @@ const ShapeCtx = struct {
         const p = g.point(i, j, k);
         var s = c.pl.dist(p) - c.st.offset;
         if (c.st.displace) |r| s -= c.st.displace_amount * (r.scalar(p) - 0.5);
-        combine(c.f, g.index(i, j, k), c.st.op, c.st.blend, s, c.st.slot);
+        combine(c.f, g.index(i, j, k), c.st, s, c.st.slot, c.st.color);
     }
 };
 
@@ -488,12 +547,13 @@ const GroupCtx = struct {
         const idx = g.index(i, j, k);
         const s = c.tmp.d[idx] - c.st.offset;
         const sl: ?u8 = c.st.slot orelse if (c.tmp.slot.len > 0) c.tmp.slot[idx] else null;
-        combine(c.f, idx, c.st.op, c.st.blend, s, sl);
+        const cl: ?[3]f32 = c.st.color orelse if (c.tmp.col.len > 0) colorOf(c.tmp.col[idx]) else null;
+        combine(c.f, idx, c.st, s, sl, cl);
     }
 };
 
 /// Samples the program; the caller frees the field.
-pub fn sample(gpa: Allocator, steps: []const Step, opts: Options) Error!struct { grid: Grid, field: []f32, slot: []u8 } {
+pub fn sample(gpa: Allocator, steps: []const Step, opts: Options) Error!struct { grid: Grid, field: []f32, slot: []u8, col: [][3]f16 } {
     if (!(opts.voxel > 0)) return error.InvalidParameter;
     var b: ?[2]Vec3 = opts.bounds;
     if (b == null) {
@@ -516,20 +576,23 @@ pub fn sample(gpa: Allocator, steps: []const Step, opts: Options) Error!struct {
     if (cells > opts.max_cells) return error.TooManyCells;
     const grid: Grid = .{ .origin = bb[0], .voxel = opts.voxel, .n = n };
     const slots = usesSlots(steps);
-    const f = try Field.init(gpa, grid.count(), slots);
+    const colors = usesColors(steps);
+    const f = try Field.init(gpa, grid.count(), slots, colors, opts.base_color, opts.voxel);
     errdefer f.deinit(gpa);
-    const e: Eval = .{ .gpa = gpa, .grid = grid, .pool = opts.pool, .margin = 2 * opts.voxel, .slots = slots, .naive_chains = opts.naive_chains };
+    const e: Eval = .{ .gpa = gpa, .grid = grid, .pool = opts.pool, .margin = 2 * opts.voxel, .slots = slots, .colors = colors, .naive_chains = opts.naive_chains };
     try e.run(f, steps);
-    return .{ .grid = grid, .field = f.d, .slot = f.slot };
+    return .{ .grid = grid, .field = f.d, .slot = f.slot, .col = f.col };
 }
 
 /// Builds the mesh of the program's zero surface: quads, smooth shaded,
-/// with a material_index attribute when steps set slots.
+/// with a material_index attribute when steps set slots and a point colour
+/// attribute when they set colours.
 pub fn mesh(gpa: Allocator, steps: []const Step, opts: Options) Error!Mesh {
     const s = try sample(gpa, steps, opts);
     defer gpa.free(s.field);
     defer gpa.free(s.slot);
-    return surfaceNets(gpa, s.grid, s.field, s.slot, opts);
+    defer gpa.free(s.col);
+    return surfaceNets(gpa, s.grid, s.field, s.slot, s.col, opts);
 }
 
 const edge_corners = [12][2]u3{
@@ -539,8 +602,9 @@ const edge_corners = [12][2]u3{
 };
 
 /// One vertex per cell the surface crosses, at the mean of its edge
-/// crossings; one quad per crossed grid edge, wound outward.
-fn surfaceNets(gpa: Allocator, g: Grid, f: []const f32, slot: []const u8, opts: Options) Error!Mesh {
+/// crossings (its colour the mean of the colours there); one quad per
+/// crossed grid edge, wound outward.
+fn surfaceNets(gpa: Allocator, g: Grid, f: []const f32, slot: []const u8, col: []const [3]f16, opts: Options) Error!Mesh {
     const cn = [3]usize{ g.n[0] - 1, g.n[1] - 1, g.n[2] - 1 };
     if (cn[0] == 0 or cn[1] == 0 or cn[2] == 0) return error.Empty;
     const none = std.math.maxInt(u32);
@@ -548,11 +612,15 @@ fn surfaceNets(gpa: Allocator, g: Grid, f: []const f32, slot: []const u8, opts: 
     defer gpa.free(cell_vert);
     var positions: std.ArrayList(Vec3) = .empty;
     defer positions.deinit(gpa);
+    var colors: std.ArrayList([4]f32) = .empty;
+    defer colors.deinit(gpa);
     for (0..cn[0]) |i| for (0..cn[1]) |j| for (0..cn[2]) |k| {
         var vals: [8]f32 = undefined;
+        var at: [8]usize = undefined;
         var inside: u8 = 0;
         for (0..8) |c| {
-            vals[c] = f[g.index(i + (c >> 2), j + ((c >> 1) & 1), k + (c & 1))];
+            at[c] = g.index(i + (c >> 2), j + ((c >> 1) & 1), k + (c & 1));
+            vals[c] = f[at[c]];
             if (vals[c] < 0) inside += 1;
         }
         const ci = (i * cn[1] + j) * cn[2] + k;
@@ -561,6 +629,7 @@ fn surfaceNets(gpa: Allocator, g: Grid, f: []const f32, slot: []const u8, opts: 
             continue;
         }
         var sum: Vec3 = .{ 0, 0, 0 };
+        var csum: Vec3 = .{ 0, 0, 0 };
         var cnt: f32 = 0;
         for (edge_corners) |ec| {
             const a = vals[ec[0]];
@@ -570,10 +639,12 @@ fn surfaceNets(gpa: Allocator, g: Grid, f: []const f32, slot: []const u8, opts: 
             const pa = cornerOffset(ec[0]);
             const pb = cornerOffset(ec[1]);
             sum = v.add(sum, v.lerp(pa, pb, t));
+            if (col.len > 0) csum = v.add(csum, v.lerp(colorOf(col[at[ec[0]]]), colorOf(col[at[ec[1]]]), t));
             cnt += 1;
         }
         cell_vert[ci] = @intCast(positions.items.len);
         try positions.append(gpa, v.add(g.point(i, j, k), v.scale(sum, g.voxel / cnt)));
+        if (col.len > 0) try colors.append(gpa, .{ csum[0] / cnt, csum[1] / cnt, csum[2] / cnt, 1 });
     };
 
     var corners: std.ArrayList(u32) = .empty;
@@ -631,6 +702,15 @@ fn surfaceNets(gpa: Allocator, g: Grid, f: []const f32, slot: []const u8, opts: 
         .material_index = mats.items,
     });
     errdefer m.releaseRefs(gpa);
+    if (col.len > 0) {
+        const owned = try colors.toOwnedSlice(gpa);
+        const data: core.types.AttrData = .{ .color = core.Shared([4]f32).fromOwned(gpa, owned) catch |e| {
+            gpa.free(owned);
+            return e;
+        } };
+        // setAttribute releases the data itself when it refuses it.
+        try m.setAttribute(gpa, opts.color_attribute, .point, data);
+    }
     if (opts.smooth_iterations > 0) {
         const pos = try gpa.dupe(Vec3, m.positions.slice());
         var pos_owned = true;
@@ -706,6 +786,58 @@ test "smooth union fills the crease; subtract cuts; slots follow the winner" {
     defer cut.releaseRefs(gpa);
     // A box with a hole through it: genus 1, so V - E + F = 0.
     try testing.expectEqual(@as(i64, 0), @as(i64, @intCast(cut.vertCount())) - @as(i64, @intCast(cut.edgeCount())) + @as(i64, @intCast(cut.faceCount())));
+}
+
+test "colours fade across smooth blends or over color_blend; uncoloured steps paint the base colour" {
+    const gpa = testing.allocator;
+    const red = [3]f32{ 1, 0, 0 };
+    const blue = [3]f32{ 0, 0, 1 };
+    const bump = [_]Step{.{ .body = .{ .shape = .{ .kind = .{ .sphere = .{ .radius = 0.15 } }, .location = .{ -0.4, 0, 0.5 } } } }};
+    const left: Shape = .{ .kind = .{ .sphere = .{ .radius = 0.5 } }, .location = .{ -0.4, 0, 0 } };
+    const right: Shape = .{ .kind = .{ .sphere = .{ .radius = 0.5 } }, .location = .{ 0.4, 0, 0 } };
+    // Blend radius, colour fade width.
+    const cases = [_][2]?f32{ .{ 0.3, null }, .{ 0, null }, .{ 0.3, 0 } };
+    for (cases) |cs| {
+        const blend = cs[0].?;
+        const soft = blend > 0 and cs[1] == null;
+        const prog = [_]Step{
+            .{ .color = red, .body = .{ .shape = left } },
+            .{ .blend = blend, .color_blend = cs[1], .color = blue, .body = .{ .shape = right } },
+            .{ .blend = 0.05, .body = .{ .group = &bump } },
+        };
+        var m = try mesh(gpa, &prog, .{ .voxel = 0.05, .color_attribute = "Col", .base_color = red });
+        defer m.releaseRefs(gpa);
+        const a = m.attribute("Col").?;
+        try testing.expectEqual(core.types.Domain.point, a.domain);
+        var mixed: usize = 0;
+        for (m.positions.slice(), a.data.color.slice()) |p, c| {
+            // Two colours: the channels share one weight.
+            try testing.expectApproxEqAbs(@as(f32, 1), c[0] + c[2], 2e-3);
+            try testing.expectEqual(@as(f32, 0), c[1]);
+            if (soft and @abs(p[0]) < 0.03) try testing.expect(c[0] > 0.3 and c[0] < 0.7);
+            // Otherwise the fade is about a voxel wide.
+            if (!soft and @abs(p[0]) > 0.1) try testing.expect(c[0] < 1e-3 or c[0] > 1 - 1e-3);
+            if (c[0] > 0.05 and c[0] < 0.95) mixed += 1;
+        }
+        try testing.expect(mixed > 0);
+        // The uncoloured bump is red, the base colour, not the blue of the
+        // far sphere whose reach its cells were in.
+        var top: usize = 0;
+        for (m.positions.slice(), 0..) |p, i| {
+            if (p[2] > m.positions.slice()[top][2]) top = i;
+        }
+        try testing.expectApproxEqAbs(@as(f32, 1), a.data.color.slice()[top][0], 1e-3);
+    }
+    // An uncoloured first step paints the base colour.
+    var based = try mesh(gpa, &.{ .{ .body = .{ .shape = left } }, .{ .color = blue, .body = .{ .shape = right } } }, .{ .voxel = 0.05, .base_color = .{ 0, 1, 0 } });
+    defer based.releaseRefs(gpa);
+    for (based.positions.slice(), based.attribute("Color").?.data.color.slice()) |p, c| {
+        if (p[0] < -0.05) try testing.expectEqual([4]f32{ 0, 1, 0, 1 }, c);
+    }
+    // Without colours there is no attribute.
+    var plain = try mesh(gpa, &.{.{ .body = .{ .shape = left } }}, .{ .voxel = 0.1 });
+    defer plain.releaseRefs(gpa);
+    try testing.expect(plain.attribute("Color") == null);
 }
 
 test "chains, mirrors and groups; the same mesh at any thread count" {

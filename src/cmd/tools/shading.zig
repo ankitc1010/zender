@@ -21,7 +21,7 @@ pub const tools = [_]Tool{
     .{
         .name = "material.create",
         .title = "Create material",
-        .description = "Create a Principled BSDF material. Colours are scene-linear RGB(A) in 0..1 (sRGB 0.5 grey is about 0.214 linear). base_color, metallic, roughness and emission_color also take a procedural texture recipe instead of a value, and normal takes {bump: recipe, strength, distance}: {texture: noise|wave|voronoi, coords object|generated|uv|normal, mapping {location, rotation, scale}, the node's inputs as Blender names them (scale, detail, roughness, lacunarity, distortion; wave_type, direction, profile, phase; randomness, output), ramp {mode linear|ease|constant, stops [[position, [r,g,b]], ...]}}; values match Blender's nodes. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"name\":\"Camo\",\"properties\":{\"roughness\":0.85,\"base_color\":{\"texture\":\"noise\",\"scale\":2.6,\"distortion\":0.6,\"ramp\":{\"mode\":\"constant\",\"stops\":[[0,[0.02,0.03,0.01]],[0.45,[0.1,0.06,0.02]],[0.64,[0.19,0.035,0.026]]]}}}}.",
+        .description = "Create a Principled BSDF material. Colours are scene-linear RGB(A) in 0..1 (sRGB 0.5 grey is about 0.214 linear). base_color, metallic, roughness and emission_color also take a procedural texture recipe instead of a value; base_color also takes {attribute: name}, a mesh colour attribute (mesh.from_sdf step colours write \"Color\"); normal takes {bump: recipe, strength, distance}: {texture: noise|wave|voronoi, coords object|generated|uv|normal, mapping {location, rotation, scale}, the node's inputs as Blender names them (scale, detail, roughness, lacunarity, distortion; wave_type, direction, profile, phase; randomness, output), ramp {mode linear|ease|constant, stops [[position, [r,g,b]], ...]}}; values match Blender's nodes. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"name\":\"Camo\",\"properties\":{\"roughness\":0.85,\"base_color\":{\"texture\":\"noise\",\"scale\":2.6,\"distortion\":0.6,\"ramp\":{\"mode\":\"constant\",\"stops\":[[0,[0.02,0.03,0.01]],[0.45,[0.1,0.06,0.02]],[0.64,[0.19,0.035,0.026]]]}}}}.",
         .params = common.mutating(&.{
             common.name,
             .{ .name = "properties", .type = .{ .properties = writeMaterialSchema }, .doc = "Material properties" },
@@ -81,8 +81,9 @@ pub const tools = [_]Tool{
 };
 
 /// Sets `properties` on a material: plain values through the registry,
-/// recipe objects (and normal's bump) as textures. A plain value for an
-/// input that had a texture removes the texture.
+/// recipe objects (and normal's bump) as textures, base_color
+/// {attribute} as a colour attribute. A plain value for an input that had
+/// a texture or an attribute removes it.
 fn applyProperties(c: *Call, m: *core.types.Material, p: std.json.Value) HandlerError!usize {
     if (p != .object) return common.setProperties(c, core.types.Material, m, p, "properties");
     const gpa = c.doc().gpa;
@@ -96,8 +97,18 @@ fn applyProperties(c: *Call, m: *core.types.Material, p: std.json.Value) Handler
             try plain.put(c.arena, key, val);
             continue;
         };
+        if (input == .base_color) m.base_color_attribute = .{};
         if (val == .null) {
             try m.setTexture(gpa, input, null);
+            n += 1;
+            continue;
+        }
+        if (input == .base_color and val == .object and val.object.get("attribute") != null) {
+            const av = val.object.get("attribute").?;
+            if (val.object.count() != 1 or av != .string or av.string.len == 0 or av.string.len > 64)
+                return c.failAt(.invalid_argument, "/properties/base_color/attribute", "give {\"attribute\": \"Color\"}: the name of a mesh colour attribute", &.{}, "invalid colour attribute", .{});
+            try m.setTexture(gpa, .base_color, null);
+            m.base_color_attribute = .init(av.string);
             n += 1;
             continue;
         }
@@ -145,6 +156,10 @@ fn writeMaterial(c: *Call, m: *const core.types.Material) HandlerError!void {
     if (m.textures.len() > 0) {
         try c.field("textures");
         try m.writeTextures(&c.out);
+    }
+    if (m.base_color_attribute.len > 0) {
+        try c.field("base_color_attribute");
+        try c.out.write(m.base_color_attribute.slice());
     }
     var any = false;
     inline for (std.meta.fields(core.types.TextureInput)) |f| {

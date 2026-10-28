@@ -66,6 +66,18 @@ pub const Mesh = struct {
     face_material: []const u16,
     /// Edge vertex pairs, for wireframe overlays and edge-based exporters.
     edges: []const [2]u32,
+    /// Colour attributes, per corner, for materials that read one.
+    color_layers: []const ColorLayer = &.{},
+
+    pub const ColorLayer = struct {
+        name: []const u8,
+        corners: []const [4]f32,
+    };
+
+    pub fn colorLayer(m: Mesh, name: []const u8) ?[]const [4]f32 {
+        for (m.color_layers) |l| if (std.mem.eql(u8, l.name, name)) return l.corners;
+        return null;
+    }
 
     pub fn faceCount(m: Mesh) usize {
         return if (m.face_offsets.len == 0) 0 else m.face_offsets.len - 1;
@@ -117,6 +129,9 @@ pub const Material = struct {
     roughness_image: ?u32 = null,
     normal_image: ?u32 = null,
     emission_image: ?u32 = null,
+    /// Mesh colour layer driving base colour, or empty; where a mesh lacks
+    /// it, base_color applies.
+    base_color_attribute: []const u8 = "",
 };
 
 /// RGBA floats, bottom row first; sRGB images hold colours (scene-linear

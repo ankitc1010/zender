@@ -214,6 +214,21 @@ pub fn evaluateMesh(arena: Allocator, ctx: Context, m: *const types.Mesh) Error!
         },
         else => {},
     };
+    var layers: std.ArrayList(ir.Mesh.ColorLayer) = .empty;
+    for (m.attrs[0..m.attr_count]) |*a| {
+        if (a.data != .color) continue;
+        const src = a.data.color.slice();
+        const corners: []const [4]f32 = switch (a.domain) {
+            .corner => src,
+            .point => blk: {
+                const out = try arena.alloc([4]f32, m.cornerCount());
+                for (m.corner_verts.slice(), out) |vi, *o| o.* = src[vi];
+                break :blk out;
+            },
+            else => continue,
+        };
+        try layers.append(arena, .{ .name = try arena.dupe(u8, a.name.slice()), .corners = corners });
+    }
     return .{
         .name = try arena.dupe(u8, m.name.slice()),
         .positions = m.positions.slice(),
@@ -223,6 +238,7 @@ pub fn evaluateMesh(arena: Allocator, ctx: Context, m: *const types.Mesh) Error!
         .corner_uvs = uvs,
         .face_material = face_mat,
         .edges = m.edges.slice(),
+        .color_layers = layers.items,
     };
 }
 
@@ -250,6 +266,8 @@ fn materialIndex(arena: Allocator, db: *core.Database, maps: *Maps, list: *std.A
         .sheen_tint = m.sheen_tint,
         .specular_ior_level = m.specular_ior_level,
         .specular_tint = m.specular_tint,
+        // An image on base colour wins, as it does over a texture.
+        .base_color_attribute = if (m.base_color_image == null) try arena.dupe(u8, m.base_color_attribute.slice()) else "",
     });
     if (m.textures.len() > 0) {
         // Until a renderer evaluates textures per point, inputs show the

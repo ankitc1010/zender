@@ -96,6 +96,7 @@ const Primitive = struct {
     normal: usize,
     uv: ?usize,
     tangent: ?usize,
+    color: ?usize,
     indices: usize,
     material: ?u32,
 };
@@ -104,10 +105,13 @@ const VertKey = struct {
     vert: u32,
     normal: [3]u32,
     uv: [2]u32,
+    color: [4]u32,
 };
 
 /// Splits one mesh into one primitive per material slot with deduplicated
-/// (vertex, normal, uv) corners; slots with a normal map get tangents.
+/// (vertex, normal, uv, colour) corners; slots with a normal map get
+/// tangents, slots whose material reads a colour attribute get COLOR_0
+/// (the material's base_color throughout where the mesh lacks it).
 fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u32, materials: []const ir.Material, report: *Report) Allocator.Error![]Primitive {
     const n_faces = m.faceCount();
     var max_slot: usize = 0;
@@ -117,10 +121,14 @@ fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u
     const has_uv = m.corner_uvs.len == m.corner_verts.len and m.corner_uvs.len > 0;
 
     for (0..max_slot + 1) |slot| {
+        const mat = if (slot < slots.len) slots[slot] else null;
+        const attr = if (mat) |i| materials[i].base_color_attribute else "";
+        const layer = if (attr.len > 0) m.colorLayer(attr) else null;
         var map: std.AutoHashMapUnmanaged(VertKey, u32) = .empty;
         var pos: std.ArrayList(Vec3) = .empty;
         var nor: std.ArrayList(Vec3) = .empty;
         var uvs: std.ArrayList([2]f32) = .empty;
+        var cols: std.ArrayList([4]f32) = .empty;
         var idx: std.ArrayList(u32) = .empty;
         for (0..n_faces) |f| {
             const s: usize = if (m.face_material.len > 0) m.face_material[f] else 0;
@@ -133,10 +141,13 @@ fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u
                 const c = start + local;
                 const n = m.corner_normals[c];
                 const uv: [2]f32 = if (has_uv) m.corner_uvs[c] else .{ 0, 0 };
+                const bc = if (mat) |i| materials[i].base_color else [4]f32{ 0, 0, 0, 0 };
+                const col: [4]f32 = if (layer) |l| l[c] else if (attr.len > 0) .{ bc[0], bc[1], bc[2], 1 } else .{ 0, 0, 0, 0 };
                 const key: VertKey = .{
                     .vert = m.corner_verts[c],
                     .normal = .{ @bitCast(n[0]), @bitCast(n[1]), @bitCast(n[2]) },
                     .uv = .{ @bitCast(uv[0]), @bitCast(uv[1]) },
+                    .color = @bitCast(col),
                 };
                 const gop = try map.getOrPut(arena, key);
                 if (!gop.found_existing) {
@@ -145,6 +156,7 @@ fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u
                     try nor.append(arena, toYUp(n));
                     // glTF puts the UV origin at the top left.
                     try uvs.append(arena, .{ uv[0], 1 - uv[1] });
+                    try cols.append(arena, col);
                 }
                 try idx.append(arena, gop.value_ptr.*);
             }
@@ -167,8 +179,12 @@ fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u
             const uvv = try bb.addView(std.mem.sliceAsBytes(uvs.items), 34962);
             ua = try bb.addAccessor(.{ .view = uvv, .component = 5126, .count = uvs.items.len, .type = "VEC2" });
         }
+        var ca: ?usize = null;
+        if (attr.len > 0) {
+            const cv = try bb.addView(std.mem.sliceAsBytes(cols.items), 34962);
+            ca = try bb.addAccessor(.{ .view = cv, .component = 5126, .count = cols.items.len, .type = "VEC4" });
+        }
         var ta: ?usize = null;
-        const mat = if (slot < slots.len) slots[slot] else null;
         if (has_uv and mat != null and materials[mat.?].normal_image != null) {
             const tan = try tangents(arena, pos.items, nor.items, uvs.items, idx.items);
             const tv = try bb.addView(std.mem.sliceAsBytes(tan), 34962);
@@ -189,8 +205,9 @@ fn writeMesh(arena: Allocator, bb: *BufferBuilder, m: ir.Mesh, slots: []const ?u
             .normal = na,
             .uv = ua,
             .tangent = ta,
+            .color = ca,
             .indices = ia,
-            .material = if (slot < slots.len) slots[slot] else null,
+            .material = mat,
         });
     }
     return prims.items;
@@ -520,6 +537,10 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
                     try w.objectField("TANGENT");
                     try w.write(t);
                 }
+                if (p.color) |col| {
+                    try w.objectField("COLOR_0");
+                    try w.write(col);
+                }
                 try w.endObject();
                 try w.objectField("indices");
                 try w.write(p.indices);
@@ -794,9 +815,10 @@ fn writeMaterial(w: *Stringify, m: ir.Material, tex: MatTextures) !void {
     try w.write(m.name);
     try w.objectField("pbrMetallicRoughness");
     try w.beginObject();
-    // glTF multiplies factor by texture, so a textured input's factor is 1.
+    // glTF multiplies factor by texture and by COLOR_0, so a textured or
+    // attribute-driven input's factor is 1.
     try w.objectField("baseColorFactor");
-    if (tex.base_color != null) {
+    if (tex.base_color != null or m.base_color_attribute.len > 0) {
         try f32Array(w, &.{ 1, 1, 1, m.base_color[3] * m.alpha });
     } else try f32Array(w, &.{ m.base_color[0], m.base_color[1], m.base_color[2], m.base_color[3] * m.alpha });
     if (tex.base_color) |i| try texRef(w, "baseColorTexture", i);

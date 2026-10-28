@@ -73,7 +73,7 @@ pub const tools = [_]Tool{
     .{
         .name = "mesh.from_sdf",
         .title = "Mesh from SDF",
-        .description = "Model with blended shapes, meshed in one call (smooth organic forms: heads, hair, armour). steps run in order; each {op: add|subtract|intersect, blend: smooth radius m (0 = hard), offset: grow m, slot: material slot, displace {amount m, texture: a material.create recipe}, and shape or steps (a group)}. shape {type, location, rotation (deg), scale (uniform), mirror_x} plus: sphere radius; ellipsoid radii [x,y,z]; box size [x,y,z], round; capsule a, b, radius or radii [ra, rb]; torus major_radius, minor_radius, stretch [sx, sy]; cylinder radius, depth (along Z); half_space normal (removes nothing on its own; everything below the plane through location); chain points [[x,y,z]...], radius or radii per point (tubes, locks of hair). voxel_size sets detail: cells = volume / voxel_size^3, at most 64M. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"name\":\"Pebble\",\"voxel_size\":0.01,\"steps\":[{\"shape\":{\"type\":\"ellipsoid\",\"radii\":[0.3,0.2,0.12]}},{\"blend\":0.05,\"shape\":{\"type\":\"capsule\",\"a\":[0,0,0.1],\"b\":[0,0,0.3],\"radius\":0.04}},{\"op\":\"subtract\",\"blend\":0.02,\"shape\":{\"type\":\"sphere\",\"radius\":0.08,\"location\":[0.2,0,0.1]}}]}.",
+        .description = "Model with blended shapes, meshed in one call (smooth organic forms: heads, hair, armour). steps run in order; each {op: add|subtract|intersect, blend: smooth radius m (0 = hard), offset: grow m, slot: material slot (a hard border along the voxel faces), color: scene-linear [r, g, b] that fades across the blend like the surfaces do (once any step has one, steps without paint the tool's color; for smooth colour borders give the object one material with base_color {attribute: \"Color\"}), color_blend: fade width m instead (0 = crisp, about a voxel), displace {amount m, texture: a material.create recipe}, and shape or steps (a group)}. shape {type, location, rotation (deg), scale (uniform), mirror_x} plus: sphere radius; ellipsoid radii [x,y,z]; box size [x,y,z], round; capsule a, b, radius or radii [ra, rb]; torus major_radius, minor_radius, stretch [sx, sy]; cylinder radius, depth (along Z); half_space normal (removes nothing on its own; everything below the plane through location); chain points [[x,y,z]...], radius or radii per point (tubes, locks of hair). voxel_size sets detail: cells = volume / voxel_size^3, at most 64M. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"name\":\"Pebble\",\"voxel_size\":0.01,\"steps\":[{\"shape\":{\"type\":\"ellipsoid\",\"radii\":[0.3,0.2,0.12]}},{\"blend\":0.05,\"shape\":{\"type\":\"capsule\",\"a\":[0,0,0.1],\"b\":[0,0,0.3],\"radius\":0.04}},{\"op\":\"subtract\",\"blend\":0.02,\"shape\":{\"type\":\"sphere\",\"radius\":0.08,\"location\":[0.2,0,0.1]}}]}.",
         .params = common.mutating(&.{
             common.name,
             .{ .name = "steps", .type = .{ .objects = .{ .max_items = 4096 } }, .doc = "Shapes and groups, in order", .required = true },
@@ -81,6 +81,8 @@ pub const tools = [_]Tool{
             .{ .name = "bounds_min", .type = .{ .vec3 = .{ .min = -1e6, .max = 1e6, .unit = .metres } }, .doc = "Sampled box; default: the added shapes" },
             .{ .name = "bounds_max", .type = .{ .vec3 = .{ .min = -1e6, .max = 1e6, .unit = .metres } }, .doc = "Sampled box" },
             .{ .name = "smooth_iterations", .type = .{ .integer = .{ .min = 0, .max = 50 } }, .doc = "Volume-keeping smoothing passes", .default = .{ .integer = 0 } },
+            .{ .name = "color_attribute", .type = .{ .string = .{ .max_len = 64 } }, .doc = "Point colour attribute the step colours go to", .default = .{ .string = "Color" } },
+            .{ .name = "color", .type = .color, .doc = "With step colours: the colour of steps without one (as slot 0 is for slots); default white" },
             material_param,
             common.location,
             common.rotation,
@@ -116,6 +118,8 @@ fn fromSdf(c: *Call) HandlerError!void {
         .voxel = a.float("voxel_size").?,
         .bounds = if (lo) |l| .{ l, hi.? } else null,
         .smooth_iterations = @intCast(a.int("smooth_iterations").?),
+        .color_attribute = a.str("color_attribute").?,
+        .base_color = if (a.color("color")) |x| x[0..3].* else .{ 1, 1, 1 },
         .pool = c.server.pool,
     }) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -159,7 +163,7 @@ const Parser = struct {
     }
 
     fn step(p: *Parser, o: ObjectMap, path: []const u8, depth: u32) HandlerError!sdf.Step {
-        try p.onlyKeys(o, path, &.{ "op", "blend", "offset", "slot", "shape", "steps", "displace" });
+        try p.onlyKeys(o, path, &.{ "op", "blend", "offset", "slot", "color", "color_blend", "shape", "steps", "displace" });
         var st: sdf.Step = .{ .body = undefined };
         if (o.get("op")) |op| {
             st.op = (if (op == .string) std.meta.stringToEnum(sdf.Op, op.string) else null) orelse
@@ -168,6 +172,18 @@ const Parser = struct {
         st.blend = try p.num(o, "blend", path, 0, 0, 100);
         st.offset = try p.num(o, "offset", path, 0, -100, 100);
         if (o.get("slot") != null) st.slot = @intFromFloat(try p.num(o, "slot", path, 0, 0, 255));
+        if (o.get("color")) |cv| {
+            const cp = try p.at(path, "color");
+            const items = if (cv == .array and cv.array.items.len == 3) cv.array.items else return p.bad(cp, "", "expected [r, g, b], scene-linear 0..1", .{});
+            var col: [3]f32 = undefined;
+            for (items, &col) |x, *ch| {
+                const f = schema.number(x) orelse return p.bad(cp, "", "expected numbers", .{});
+                if (!(f >= 0 and f <= 1)) return p.bad(cp, "", "colour channels must be within 0 to 1", .{});
+                ch.* = @floatCast(f);
+            }
+            st.color = col;
+        }
+        if (o.get("color_blend") != null) st.color_blend = try p.num(o, "color_blend", path, null, 0, 100);
         if (o.get("displace")) |dv| {
             const dp = try p.at(path, "displace");
             if (dv != .object) return p.bad(dp, "", "'displace' must be {{amount, texture}}", .{});

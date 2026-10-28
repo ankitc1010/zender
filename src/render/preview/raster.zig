@@ -74,6 +74,9 @@ const Instance = struct {
     /// Material colour per slot (when faces use several slots).
     slot_colors: []const [3]f32,
     slot_emission: []const [3]f32,
+    /// Per slot, the corner colours replacing the material colour, for
+    /// materials that read a colour attribute the mesh has.
+    slot_layers: []const ?[]const [4]f32,
 };
 
 const ScreenVert = struct {
@@ -198,11 +201,14 @@ pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError
         const slots = @max(1, n.materials.len);
         const colors = try arena.alloc([3]f32, slots);
         const emis = try arena.alloc([3]f32, slots);
+        const layers = try arena.alloc(?[]const [4]f32, slots);
         var cull = false;
         for (0..slots) |s| {
             const mat: ?ir.Material = if (s < n.materials.len) if (n.materials[s]) |m| scene.materials[m] else null else null;
+            layers[s] = null;
             if (mat) |m| {
                 colors[s] = .{ m.base_color[0], m.base_color[1], m.base_color[2] };
+                if (m.base_color_attribute.len > 0) layers[s] = mesh.colorLayer(m.base_color_attribute);
                 emis[s] = v.scale(m.emission_color, m.emission_strength);
                 if (s == 0) cull = !m.double_sided;
             } else {
@@ -220,6 +226,7 @@ pub fn render(gpa: Allocator, scene: *const ir.Scene, opts: Options) RenderError
             .cull_back = cull,
             .slot_colors = colors,
             .slot_emission = emis,
+            .slot_layers = layers,
         });
         n_verts += mesh.positions.len;
     }
@@ -727,7 +734,13 @@ fn renderTile(ctx: *const Ctx, tile: usize) void {
             // Double-sided: shade the side facing the camera.
             if (n[2] < 0) n = v.scale(n, -1);
             const slot = @min(tri.slot, inst.slot_colors.len - 1);
-            const base = inst.slot_colors[slot];
+            var base = inst.slot_colors[slot];
+            if (inst.slot_layers[slot]) |layer| {
+                base = .{ 0, 0, 0 };
+                for (0..3) |r| for (0..3) |ch| {
+                    base[ch] += layer[tri.c[r]][ch] * ob[r];
+                };
+            }
             const emis = inst.slot_emission[slot];
             const light = 0.22 + 0.68 * @max(0, v.dot(n, key)) + 0.18 * @max(0, v.dot(n, fill));
             const col = [4]f32{
@@ -831,6 +844,49 @@ test "renders a quad in front of the automatic view and is thread-count independ
     }
     try std.testing.expectEqual(hashes[0], hashes[1]);
     try std.testing.expectEqual(hashes[0], hashes[2]);
+}
+
+test "a material reading a colour attribute shades with the interpolated corner colours" {
+    const gpa = std.testing.allocator;
+    const red = [4]f32{ 1, 0, 0, 1 };
+    const blue = [4]f32{ 0, 0, 1, 1 };
+    const mesh: ir.Mesh = .{
+        .name = "Quad",
+        .positions = &.{ .{ -1, -1, 0 }, .{ 1, -1, 0 }, .{ 1, 1, 0 }, .{ -1, 1, 0 } },
+        .face_offsets = &.{ 0, 4 },
+        .corner_verts = &.{ 0, 1, 2, 3 },
+        .corner_normals = &.{ .{ 0, 0, 1 }, .{ 0, 0, 1 }, .{ 0, 0, 1 }, .{ 0, 0, 1 } },
+        .corner_uvs = &.{},
+        .face_material = &.{},
+        .edges = &.{},
+        .color_layers = &.{.{ .name = "Col", .corners = &.{ red, blue, blue, red } }},
+    };
+    const mat: ir.Material = .{ .name = "M", .base_color = .{ 0, 1, 0, 1 }, .metallic = 0, .roughness = 0.5, .ior = 1.5, .transmission = 0, .emission_color = .{ 0, 0, 0 }, .emission_strength = 0, .alpha = 1, .double_sided = true, .base_color_attribute = "Col" };
+    const scene: ir.Scene = .{
+        .name = "S",
+        .nodes = &.{.{ .name = "Quad", .parent = null, .local = v.identity, .world = v.identity, .kind = .{ .mesh = 0 }, .materials = &.{0}, .hide_render = false }},
+        .meshes = &.{mesh},
+        .materials = &.{mat},
+        .cameras = &.{},
+        .lights = &.{},
+        .world = .{ .color = .{ 0.05, 0.05, 0.05 }, .strength = 1 },
+        .active_camera = null,
+        .resolution = .{ 64, 64 },
+        .fps = 24,
+        .frame_start = 1,
+        .frame_end = 1,
+    };
+    var r = try render(gpa, &scene, .{ .width = 150, .height = 100, .pool = .{ .io = std.testing.io, .threads = 1 } });
+    defer r.deinit(gpa);
+    // The two sides of the quad lean opposite ways, and nothing is green.
+    var lean: [2]i32 = undefined;
+    for ([_]usize{ 50, 100 }, &lean) |x, *l| {
+        const k = 50 * 150 + x;
+        try std.testing.expectEqual(@as(u32, 1), r.object_id[k]);
+        try std.testing.expectEqual(@as(u8, 0), r.rgba[k * 4 + 1]);
+        l.* = @as(i32, r.rgba[k * 4]) - @as(i32, r.rgba[k * 4 + 2]);
+    }
+    try std.testing.expect(lean[0] * lean[1] < 0);
 }
 
 test "floor through the near plane is clipped, not dropped" {
