@@ -10,6 +10,7 @@ const core = @import("../core/root.zig");
 const build = @import("build.zig");
 const em_mod = @import("editmesh.zig");
 const ops = @import("ops.zig");
+const normals_mod = @import("normals.zig");
 
 pub const subdivision = @import("modifiers/subdivision.zig");
 pub const decimate = @import("modifiers/decimate.zig");
@@ -64,7 +65,7 @@ pub fn apply(gpa: Allocator, m: *const Mesh, md: *const Modifier, ctx: Context, 
         .solidify => solidify(gpa, m, md),
         .subdivision => blk: {
             const levels: u32 = @intCast(std.math.clamp(if (ctx.purpose == .render) md.render_levels else md.levels, 0, 6));
-            break :blk subdivision.subdivide(gpa, m, levels, md.subdivision_type == .simple, ctx.stop);
+            break :blk subdivision.subdivide(gpa, m, levels, md.subdivision_type == .simple, md.use_limit_surface, ctx.stop);
         },
         .bevel => bevelEdges(gpa, m, md, ctx, note),
         .boolean => booleanWith(gpa, m, md, ctx, note),
@@ -335,16 +336,25 @@ fn mirrorAxis(gpa: Allocator, m: *const Mesh, axis: usize, frame: Mat4, frame_in
     return b.finish(m);
 }
 
-/// Area-weighted vertex normals (unit; zero for loose vertices).
+/// Vertex normals as Blender computes them: face normals weighted by the
+/// corner angle. As in Blender, a zero-area face faces +Z, a corner with a
+/// zero-length edge weighs a right angle, and a vertex whose faces cancel
+/// out (or a loose one) takes the direction of its position, so solidify
+/// and displace move degenerate spots alike.
 pub fn vertexNormals(gpa: Allocator, s: Source) Allocator.Error![]Vec3 {
     const out = try gpa.alloc(Vec3, s.pos.len);
     @memset(out, .{ 0, 0, 0 });
     for (0..s.faces()) |f| {
         const cs = s.cv[s.off[f]..s.off[f + 1]];
-        const n = math.triangulate.newellNormal(s.pos, cs);
-        for (cs) |x| out[x] = v.add(out[x], n);
+        const n = normals_mod.faceNormal(s.pos, cs);
+        for (cs, 0..) |x, k| {
+            const p = s.pos[x];
+            const a = v.normalize(v.sub(s.pos[cs[if (k == 0) cs.len - 1 else k - 1]], p));
+            const b = v.normalize(v.sub(s.pos[cs[if (k + 1 == cs.len) 0 else k + 1]], p));
+            out[x] = v.add(out[x], v.scale(n, std.math.acos(std.math.clamp(v.dot(a, b), -1.0, 1.0))));
+        }
     }
-    for (out) |*n| n.* = v.normalize(n.*);
+    for (out, s.pos) |*n, p| n.* = normals_mod.vertexNormal(n.*, p);
     return out;
 }
 

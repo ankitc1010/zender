@@ -10,14 +10,28 @@ const Vec3 = math.Vec3;
 const v = math.vec;
 const Mesh = core.types.Mesh;
 
+/// A face's unit normal; a zero-area face faces +Z, as in Blender, so
+/// every corner of it still gets a usable normal.
+pub fn faceNormal(pos: []const Vec3, corners: []const u32) Vec3 {
+    const raw = math.triangulate.newellNormal(pos, corners);
+    return if (v.length(raw) < 1e-20) .{ 0, 0, 1 } else v.normalize(raw);
+}
+
+/// A summed vertex normal made unit; where the faces cancel out or there
+/// are none, the direction of the position, as Blender does (+Z at the
+/// origin).
+pub fn vertexNormal(sum: Vec3, pos: Vec3) Vec3 {
+    if (v.length(sum) >= 1e-20) return v.normalize(sum);
+    if (v.length(pos) >= 1e-20) return v.normalize(pos);
+    return .{ 0, 0, 1 };
+}
+
 pub fn faceNormals(gpa: Allocator, m: *const Mesh) Allocator.Error![]Vec3 {
     const pos = m.positions.slice();
     const off = m.face_offsets.slice();
     const cv = m.corner_verts.slice();
     const out = try gpa.alloc(Vec3, m.faceCount());
-    for (out, 0..) |*n, f| {
-        n.* = v.normalize(math.triangulate.newellNormal(pos, cv[off[f]..off[f + 1]]));
-    }
+    for (out, 0..) |*n, f| n.* = faceNormal(pos, cv[off[f]..off[f + 1]]);
     return out;
 }
 
@@ -68,7 +82,7 @@ pub fn cornerNormals(gpa: Allocator, m: *const Mesh, pool: math.Pool) (Allocator
             for (lo..hi) |f| {
                 const s_ = c.off[f];
                 const e = c.off[f + 1];
-                const n = v.normalize(math.triangulate.newellNormal(c.pos, c.cv[s_..e]));
+                const n = faceNormal(c.pos, c.cv[s_..e]);
                 c.fnorm[f] = n;
                 if (!c.smooth or (c.sharp.len != 0 and c.sharp[f])) continue;
                 for (s_..e) |k| {
@@ -85,7 +99,7 @@ pub fn cornerNormals(gpa: Allocator, m: *const Mesh, pool: math.Pool) (Allocator
         fn normalizeVerts(c: *const @This(), chunk: usize) void {
             const lo = chunk * chunk_verts;
             const hi = @min(c.vnorm.len, lo + chunk_verts);
-            for (c.vnorm[lo..hi]) |*n| n.* = v.normalize(n.*);
+            for (c.vnorm[lo..hi], c.pos[lo..hi]) |*n, p| n.* = vertexNormal(n.*, p);
         }
 
         fn corners(c: *const @This(), chunk: usize) void {

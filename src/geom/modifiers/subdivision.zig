@@ -3,8 +3,9 @@
 //! points on every edge; `simple` keeps them at plain averages, so the
 //! shape stays and only the faces split, while Catmull-Clark also moves
 //! every point by the standard rules (open borders follow the cubic
-//! B-spline rule along the border). UVs are interpolated linearly within
-//! each face, so UV islands keep their borders.
+//! B-spline rule along the border). With `limit`, Blender's default, the
+//! last level's points then move onto the limit surface. UVs are
+//! interpolated linearly within each face, so UV islands keep their borders.
 
 const std = @import("std");
 const math = @import("math");
@@ -17,7 +18,7 @@ const Vec3 = math.Vec3;
 const v = math.vec;
 const Mesh = core.types.Mesh;
 
-pub fn subdivide(gpa: Allocator, m: *const Mesh, levels: u32, simple: bool, stop: ?em_mod.Stop) mods.Error!Mesh {
+pub fn subdivide(gpa: Allocator, m: *const Mesh, levels: u32, simple: bool, limit: bool, stop: ?em_mod.Stop) mods.Error!Mesh {
     var cur = mods.copy(m);
     errdefer cur.releaseRefs(gpa);
     for (0..levels) |_| {
@@ -26,7 +27,71 @@ pub fn subdivide(gpa: Allocator, m: *const Mesh, levels: u32, simple: bool, stop
         cur.releaseRefs(gpa);
         cur = next;
     }
+    if (limit and !simple and levels > 0) try toLimit(gpa, &cur);
     return cur;
+}
+
+/// Moves every point onto the Catmull-Clark limit surface: an interior
+/// point of valence n by (n²·p + 4·Σ edge neighbours + Σ diagonal
+/// neighbours) / (n·(n + 5)), a point on a smooth border by
+/// (n1 + 4·p + n2) / 6. Corners and non-manifold points stay, as in `once`.
+/// Expects quads, which every level of subdivision leaves.
+fn toLimit(gpa: Allocator, m: *Mesh) mods.Error!void {
+    const s = mods.Source.init(m);
+    const nv = s.pos.len;
+    var uses: std.AutoArrayHashMapUnmanaged(u64, u32) = .empty;
+    defer uses.deinit(gpa);
+    const lim = try gpa.alloc(Vec3, nv);
+    defer gpa.free(lim);
+    const edge_sum = try gpa.alloc(Vec3, nv);
+    defer gpa.free(edge_sum);
+    @memset(edge_sum, .{ 0, 0, 0 });
+    const diag_sum = try gpa.alloc(Vec3, nv);
+    defer gpa.free(diag_sum);
+    @memset(diag_sum, .{ 0, 0, 0 });
+    const border_nb = try gpa.alloc(Vec3, nv);
+    defer gpa.free(border_nb);
+    @memset(border_nb, .{ 0, 0, 0 });
+    // Per vertex: edges, border edges, faces; maxInt marks a point that stays.
+    const count = try gpa.alloc([3]u32, nv);
+    defer gpa.free(count);
+    @memset(count, .{ 0, 0, 0 });
+    for (0..s.faces()) |f| {
+        const lo = s.off[f];
+        const hi = s.off[f + 1];
+        for (lo..hi) |c| {
+            const x = s.cv[c];
+            const gop = try uses.getOrPut(gpa, edgeKey(x, s.cv[if (c + 1 == hi) lo else c + 1]));
+            gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+            if (hi - lo == 4) {
+                diag_sum[x] = v.add(diag_sum[x], s.pos[s.cv[lo + (c - lo + 2) % 4]]);
+                count[x][2] += 1;
+            } else count[x][2] = std.math.maxInt(u32);
+        }
+    }
+    for (uses.keys(), uses.values()) |key, u| {
+        const e = [2]u32{ @intCast(key >> 32), @truncate(key) };
+        for (e, 0..) |x, k| {
+            const other = s.pos[e[1 - k]];
+            count[x][0] += 1;
+            edge_sum[x] = v.add(edge_sum[x], other);
+            if (u == 1) {
+                count[x][1] += 1;
+                border_nb[x] = v.add(border_nb[x], other);
+            } else if (u > 2) count[x][2] = std.math.maxInt(u32);
+        }
+    }
+    for (lim, s.pos, count, 0..) |*q, p, c, x| {
+        q.* = p;
+        if (c[2] == std.math.maxInt(u32) or c[0] == 0) continue;
+        if (c[1] == 2 and c[0] > 2) {
+            q.* = v.scale(v.add(v.scale(p, 4), border_nb[x]), 1.0 / 6.0);
+        } else if (c[1] == 0 and c[2] == c[0]) {
+            const n: f32 = @floatFromInt(c[0]);
+            q.* = v.scale(v.add(v.add(v.scale(p, n * n), v.scale(edge_sum[x], 4)), diag_sum[x]), 1 / (n * (n + 5)));
+        }
+    }
+    @memcpy(try m.positions.mut(gpa), lim);
 }
 
 fn edgeKey(a: u32, b: u32) u64 {
@@ -183,7 +248,7 @@ test "Catmull-Clark on a cube converges toward a sphere-like shape" {
     const gpa = testing.allocator;
     var cube = try prims.generate(gpa, .cube, .{});
     defer cube.releaseRefs(gpa);
-    var one = try subdivide(gpa, &cube, 1, false, null);
+    var one = try subdivide(gpa, &cube, 1, false, false, null);
     defer one.releaseRefs(gpa);
     try testing.expect(build.validate(&one) == null);
     try testing.expectEqual(@as(usize, 24), one.faceCount());
@@ -191,11 +256,11 @@ test "Catmull-Clark on a cube converges toward a sphere-like shape" {
     // Corner vertex of a unit-half cube: (Q + 2R + (n-3)P)/n with n = 3
     // gives 5/9 on each axis.
     try testing.expectApproxEqAbs(@as(f32, 5.0 / 9.0), @abs(one.positions.slice()[0][0]), 1e-6);
-    var three = try subdivide(gpa, &cube, 3, false, null);
+    var three = try subdivide(gpa, &cube, 3, false, false, null);
     defer three.releaseRefs(gpa);
     try testing.expectEqual(@as(usize, 6 * 64), three.faceCount());
     // Simple subdivision keeps the shape: corners stay at 1.
-    var flat = try subdivide(gpa, &cube, 2, true, null);
+    var flat = try subdivide(gpa, &cube, 2, true, true, null);
     defer flat.releaseRefs(gpa);
     try testing.expectEqual(@as(f32, 1), @abs(flat.positions.slice()[0][0]));
     try testing.expect(flat.attribute(Mesh.uv_name) != null);
@@ -204,9 +269,28 @@ test "Catmull-Clark on a cube converges toward a sphere-like shape" {
     var g = try prims.generate(gpa, .grid, .{ .x_subdivisions = 2, .y_subdivisions = 2 });
     defer g.releaseRefs(gpa);
     const corner_before = g.positions.slice()[0];
-    var gs = try subdivide(gpa, &g, 2, false, null);
+    var gs = try subdivide(gpa, &g, 2, false, true, null);
     defer gs.releaseRefs(gpa);
     try testing.expectEqual(@as(usize, 64), gs.faceCount());
     for (gs.positions.slice()) |p| try testing.expectEqual(@as(f32, 0), p[2]);
     try testing.expectEqual(corner_before, gs.positions.slice()[0]);
+}
+
+test "limit positions are where further levels converge" {
+    const gpa = testing.allocator;
+    var cube = try prims.generate(gpa, .cube, .{});
+    defer cube.releaseRefs(gpa);
+    var lim = try subdivide(gpa, &cube, 1, false, true, null);
+    defer lim.releaseRefs(gpa);
+    // Each level keeps the earlier points first, in order.
+    var deep = try subdivide(gpa, &cube, 7, false, false, null);
+    defer deep.releaseRefs(gpa);
+    var plain = try subdivide(gpa, &cube, 1, false, false, null);
+    defer plain.releaseRefs(gpa);
+    var moved: f32 = 0;
+    for (lim.positions.slice(), deep.positions.slice()[0..lim.vertCount()], plain.positions.slice()) |a, b, c| {
+        try testing.expect(v.length(v.sub(a, b)) < 1e-3);
+        moved = @max(moved, v.length(v.sub(c, b)));
+    }
+    try testing.expect(moved > 1e-2);
 }
