@@ -417,6 +417,7 @@ fn displace(gpa: Allocator, m: *const Mesh, md: *const Modifier, ctx: Context) E
         const value: f32 = switch (md.texture) {
             .none => 1,
             .noise => noise.fbm(v.scale(p.*, 1 / @max(md.noise_scale, 1e-4)), @intCast(md.noise_seed)),
+            .recipe => md.recipe.scalar(p.*),
         };
         p.* = v.add(p.*, v.scale(n, md.strength * (value - md.mid_level)));
     }

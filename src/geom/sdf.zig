@@ -58,6 +58,10 @@ pub const Step = struct {
     offset: f32 = 0,
     /// Material slot of the surface this step contributes.
     slot: ?u8 = null,
+    /// Push the shape's surface out by amount x (texture - 0.5), the
+    /// texture read at the program-space point.
+    displace: ?*const math.texture.Recipe = null,
+    displace_amount: f32 = 0,
     body: union(enum) { shape: Shape, group: []const Step },
 };
 
@@ -221,7 +225,8 @@ fn addedBounds(steps: []const Step, acc: *?[2]Vec3) bool {
             },
         };
         if (b) |bb| {
-            const grown = [2]Vec3{ v.sub(bb[0], @splat(st.blend)), v.add(bb[1], @splat(st.blend)) };
+            const reach = st.blend + displaceReach(st);
+            const grown = [2]Vec3{ v.sub(bb[0], @splat(reach)), v.add(bb[1], @splat(reach)) };
             acc.* = if (acc.*) |a| .{ v.min3(a[0], grown[0]), v.max3(a[1], grown[1]) } else grown;
         }
     }
@@ -344,7 +349,7 @@ const Eval = struct {
         const r = if (st.op == .intersect or wb == null)
             [2][3]usize{ .{ 0, 0, 0 }, e.grid.n }
         else
-            e.grid.range(e.grow(wb.?, st.blend));
+            e.grid.range(e.grow(wb.?, st.blend + displaceReach(st)));
         try e.forRange(r, ShapeCtx{ .f = f, .pl = Placed.init(s), .st = st, .grid = e.grid });
     }
 
@@ -355,7 +360,7 @@ const Eval = struct {
     /// testing every segment in every cell of the chain's box.
     fn chainStep(e: *const Eval, f: Field, st: Step, s: Shape) Error!void {
         const c = s.kind.chain;
-        const r = e.grid.range(e.grow(worldBounds(s, st.offset).?, st.blend));
+        const r = e.grid.range(e.grow(worldBounds(s, st.offset).?, st.blend + displaceReach(st)));
         if (r[1][0] <= r[0][0] or r[1][1] <= r[0][1] or r[1][2] <= r[0][2]) return;
         // Segments in world space, mirrored copies included.
         const copies: usize = if (s.mirror_x) 2 else 1;
@@ -372,7 +377,7 @@ const Eval = struct {
             }
             const ra = c.radii[i] * s.scale - st.offset;
             const rb = c.radii[i + 1] * s.scale - st.offset;
-            const g = @max(ra, rb) + st.blend + e.margin;
+            const g = @max(ra, rb) + st.blend + displaceReach(st) + e.margin;
             const box = e.grid.range(.{ v.sub(v.min3(a, b), @splat(g)), v.add(v.max3(a, b), @splat(g)) });
             segs[copy * (c.points.len - 1) + i] = .{ .a = a, .b = b, .ra = ra, .rb = rb, .box = box };
         };
@@ -388,7 +393,10 @@ const Eval = struct {
             f: Field,
             st: Step,
             fn cell(cx: @This(), g: Grid, i: usize, j: usize, k: usize) void {
-                const t = cx.tmp[((i - cx.r[0][0]) * cx.dims[1] + (j - cx.r[0][1])) * cx.dims[2] + (k - cx.r[0][2])];
+                var t = cx.tmp[((i - cx.r[0][0]) * cx.dims[1] + (j - cx.r[0][1])) * cx.dims[2] + (k - cx.r[0][2])];
+                if (cx.st.displace) |tex| if (t < big) {
+                    t -= cx.st.displace_amount * (tex.scalar(g.point(i, j, k)) - 0.5);
+                };
                 combine(cx.f, g.index(i, j, k), cx.st.op, cx.st.blend, t, cx.st.slot);
             }
         };
@@ -452,6 +460,11 @@ const Eval = struct {
     }
 };
 
+/// How far a step's displacement can move its surface out.
+fn displaceReach(st: Step) f32 {
+    return if (st.displace != null) @abs(st.displace_amount) else 0;
+}
+
 const Seg = struct { a: Vec3, b: Vec3, ra: f32, rb: f32, box: [2][3]usize };
 
 const ShapeCtx = struct {
@@ -460,7 +473,9 @@ const ShapeCtx = struct {
     st: Step,
     grid: Grid,
     fn cell(c: ShapeCtx, g: Grid, i: usize, j: usize, k: usize) void {
-        const s = c.pl.dist(g.point(i, j, k)) - c.st.offset;
+        const p = g.point(i, j, k);
+        var s = c.pl.dist(p) - c.st.offset;
+        if (c.st.displace) |r| s -= c.st.displace_amount * (r.scalar(p) - 0.5);
         combine(c.f, g.index(i, j, k), c.st.op, c.st.blend, s, c.st.slot);
     }
 };

@@ -9,6 +9,7 @@ const engine = @import("engine");
 const server = @import("../server.zig");
 const schema = @import("../schema.zig");
 const common = @import("common.zig");
+const shading = @import("shading.zig");
 
 const core = engine.core;
 const geom = engine.geom;
@@ -39,7 +40,7 @@ pub const tools = [_]Tool{
     .{
         .name = "modifier.add",
         .title = "Add modifier",
-        .description = "Add a modifier to a mesh object's stack; it changes what previews and exports see, not the mesh, until applied. Types and their settings: array (count, relative_offset, constant_offset, merge; target steps by its transform), mirror (axis_x/y/z, merge, merge_threshold; target is the centre), solidify (thickness, offset), subdivision (levels, render_levels, subdivision_type), bevel (width, segments, angle_limit), boolean (operation; target required), displace (strength, mid_level, texture none|noise, noise_scale, noise_seed), decimate (ratio), triangulate (quad_method, ngon_method); all have show_viewport, show_render. Returns the evaluated counts. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Head\",\"type\":\"subdivision\",\"properties\":{\"levels\":2}}.",
+        .description = "Add a modifier to a mesh object's stack; it changes what previews and exports see, not the mesh, until applied. Types and their settings: array (count, relative_offset, constant_offset, merge; target steps by its transform), mirror (axis_x/y/z, merge, merge_threshold; target is the centre), solidify (thickness, offset), subdivision (levels, render_levels, subdivision_type), bevel (width, segments, angle_limit), boolean (operation; target required), displace (strength, mid_level, texture none|noise, noise_scale, noise_seed, or texture_recipe: a material.create recipe), decimate (ratio), triangulate (quad_method, ngon_method); all have show_viewport, show_render. Returns the evaluated counts. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"object\":\"Head\",\"type\":\"subdivision\",\"properties\":{\"levels\":2}}.",
         .params = common.mutating(&.{
             object_param,
             .{ .name = "type", .type = .{ .enumeration = kinds }, .doc = "Modifier type", .required = true },
@@ -164,7 +165,18 @@ fn setTarget(c: *Call, ob_h: IdHandle, md: *Modifier) HandlerError!void {
 
 /// Applies `properties`, warning about settings this kind ignores.
 fn setSettings(c: *Call, md: *Modifier) HandlerError!void {
-    const p = c.args.value("properties") orelse return;
+    const p0 = c.args.value("properties") orelse return;
+    // texture_recipe is a procedural texture, not a registry value.
+    var p = p0;
+    if (p0 == .object) if (p0.object.get("texture_recipe")) |rv| {
+        if (rv != .object) return c.failAt(.invalid_argument, "/properties/texture_recipe", "see the recipe keys in material.create", &.{}, "texture_recipe must be an object", .{});
+        md.recipe = try shading.parseRecipe(c, rv.object, "/properties/texture_recipe");
+        md.texture = .recipe;
+        var rest: std.json.ObjectMap = .empty;
+        var it0 = p0.object.iterator();
+        while (it0.next()) |e| if (!std.mem.eql(u8, e.key_ptr.*, "texture_recipe")) try rest.put(c.arena, e.key_ptr.*, e.value_ptr.*);
+        p = .{ .object = rest };
+    };
     _ = try common.setProperties(c, Modifier, md, p, "properties");
     var it = p.object.iterator();
     while (it.next()) |kv| {

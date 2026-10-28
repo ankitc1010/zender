@@ -30,6 +30,9 @@ pub const Params = struct {
     angle_start: f32 = 0,
     angle_end: f32 = tau,
     relief: Relief = .{},
+    /// Instead of flutes: offset along the radius by relief.depth x
+    /// (texture - 0.5), read at each vertex's base position.
+    relief_texture: ?*const math.texture.Recipe = null,
     /// Fill the first / last profile ring (full turns only).
     cap_start: bool = false,
     cap_end: bool = false,
@@ -96,12 +99,13 @@ pub fn revolve(gpa: Allocator, p: Params) Error!Mesh {
         const ca = @cos(a);
         const sa = @sin(a);
         for (p.profile, 0..) |pt, k| {
+            const hk = if (p.relief_texture) |r| p.relief.depth * (r.scalar(.{ pt[1] * ca, pt[1] * sa, pt[0] }) - 0.5) else h;
             index[j * n + k] = if (k == 0 and pole_start)
                 start_pole
             else if (k == n - 1 and pole_end)
                 end_pole
             else
-                try b.vert(.{ (pt[1] + h) * ca, (pt[1] + h) * sa, pt[0] });
+                try b.vert(.{ (pt[1] + hk) * ca, (pt[1] + hk) * sa, pt[0] });
         }
     }
     for (0..segs) |j| {

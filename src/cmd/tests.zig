@@ -769,3 +769,38 @@ test "curve.add sweeps tubes, edits settings, exports and converts" {
     const again = try f.call("curve.to_mesh", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Stick\"}}", .{id}));
     try testing.expectEqualStrings("/object", again.tool_error.path);
 }
+
+test "procedural textures on materials, displacement and relief" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    const camo = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Camo\",\"properties\":{{\"roughness\":0.85,\"base_color\":{{\"texture\":\"noise\",\"scale\":2.6,\"detail\":2,\"roughness\":0.55,\"distortion\":0.6,\"ramp\":{{\"mode\":\"constant\",\"stops\":[[0,[0.02,0.03,0.01]],[0.45,[0.1,0.06,0.02]],[0.64,[0.19,0.035,0.026]]]}}}},\"normal\":{{\"bump\":{{\"texture\":\"wave\",\"wave_type\":\"rings\",\"direction\":\"spherical\",\"distortion\":6}},\"strength\":0.5}}}}}}", .{id}));
+    const tex = camo.object.get("textures").?.object;
+    try testing.expectEqualStrings("constant", tex.get("base_color").?.object.get("ramp").?.object.get("mode").?.string);
+    try testing.expect(tex.get("normal").?.object.get("strength").?.float == 0.5);
+    const typo = try f.call("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"properties\":{{\"base_color\":{{\"texture\":\"noise\",\"scal\":2}}}}}}", .{id}));
+    try testing.expectEqualStrings("/properties/base_color/scal", typo.tool_error.path);
+    // A plain value replaces the texture.
+    _ = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Rough\",\"properties\":{{\"roughness\":{{\"texture\":\"voronoi\"}}}}}}", .{id}));
+    const plain = try f.ok("material.update", try f.fmt("{{\"scene_id\":\"{s}\",\"material\":\"Rough\",\"properties\":{{\"roughness\":0.3}}}}", .{id}));
+    try testing.expect(plain.object.get("textures") == null);
+
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"grid\",\"name\":\"Band\",\"grid_subdivisions\":40,\"material\":\"Camo\"}}", .{id}));
+    const out = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"camo.glb\"}}", .{id}));
+    const dropped = out.object.get("dropped").?.array.items;
+    try testing.expectEqual(@as(usize, 1), dropped.len);
+    try testing.expect(std.mem.indexOf(u8, dropped[0].string, "procedural base_color, normal") != null);
+
+    // Displace with a recipe: the flat grid gains height.
+    _ = try f.ok("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Band\",\"type\":\"displace\",\"properties\":{{\"strength\":0.2,\"texture_recipe\":{{\"texture\":\"noise\",\"scale\":3}}}}}}", .{id}));
+    const band = try f.ok("scene.inspect", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Band\"}}", .{id}));
+    _ = band;
+    const preview = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Band\"}}", .{id}));
+    _ = preview;
+    // SDF step displacement and revolve relief by texture.
+    _ = try f.ok("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Rock\",\"voxel_size\":0.03,\"steps\":[{{\"shape\":{{\"type\":\"sphere\",\"radius\":0.5}},\"displace\":{{\"amount\":0.1,\"texture\":{{\"texture\":\"voronoi\",\"scale\":4}}}}}}]}}", .{id}));
+    const bad_disp = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"steps\":[{{\"shape\":{{\"type\":\"sphere\",\"radius\":0.5}},\"displace\":{{\"amount\":0.1}}}}]}}", .{id}));
+    try testing.expectEqualStrings("/steps/0/displace/texture", bad_disp.tool_error.path);
+    _ = try f.ok("mesh.revolve", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Bark\",\"profile\":[[0,0.3],[2,0.25]],\"segments\":48,\"relief_depth\":0.05,\"relief_texture\":{{\"texture\":\"wave\",\"direction\":\"z\",\"scale\":4}}}}", .{id}));
+}

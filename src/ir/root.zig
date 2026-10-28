@@ -106,6 +106,9 @@ pub const Material = struct {
     sheen_tint: Vec3 = .{ 1, 1, 1 },
     specular_ior_level: f32 = 0.5,
     specular_tint: Vec3 = .{ 1, 1, 1 },
+    /// Inputs driven by a procedural texture, by name; their values above
+    /// are the texture's mean until something evaluates it per point.
+    procedural: []const []const u8 = &.{},
 };
 
 pub const Projection = enum { perspective, orthographic };

@@ -129,7 +129,7 @@ pub const Object = struct {
 pub const ModifierKind = enum { array, mirror, solidify, subdivision, bevel, boolean, displace, decimate, triangulate };
 pub const SubdivisionType = enum { catmull_clark, simple };
 pub const BooleanOperation = enum { difference, @"union", intersect };
-pub const DisplaceTexture = enum { none, noise };
+pub const DisplaceTexture = enum { none, noise, recipe };
 pub const QuadMethod = enum { beauty, fixed, alternate, shortest_diagonal, longest_diagonal };
 pub const NgonMethod = enum { beauty, clip };
 
@@ -165,6 +165,8 @@ pub const Modifier = struct {
     strength: f32 = 1,
     mid_level: f32 = 0.5,
     texture: DisplaceTexture = .none,
+    /// The texture when `texture` is recipe (set through texture_recipe).
+    recipe: math.texture.Recipe = .{},
     noise_scale: f32 = 1,
     noise_seed: i32 = 0,
     ratio: f32 = 0.5,
@@ -193,7 +195,7 @@ pub const Modifier = struct {
         .{ .name = "operation", .field = "operation", .kind = .enumeration, .doc = "boolean: what to do with the target", .blend = "operation" },
         .{ .name = "strength", .field = "strength", .kind = .float, .unit = .length, .min = -1e6, .max = 1e6, .doc = "displace: distance along the normal at full texture value", .blend = "strength" },
         .{ .name = "mid_level", .field = "mid_level", .kind = .float, .min = 0, .max = 1, .doc = "displace: texture value that stays in place", .blend = "midlevel" },
-        .{ .name = "texture", .field = "texture", .kind = .enumeration, .doc = "displace: none (uniform) or noise", .blend = "texture" },
+        .{ .name = "texture", .field = "texture", .kind = .enumeration, .doc = "displace: none (uniform), noise, or recipe (from texture_recipe)", .blend = "texture" },
         .{ .name = "noise_scale", .field = "noise_scale", .kind = .float, .unit = .length, .min = 1e-4, .max = 1e6, .doc = "displace: size of the noise features" },
         .{ .name = "noise_seed", .field = "noise_seed", .kind = .int, .min = 0, .max = 1000000, .doc = "displace: noise variation" },
         .{ .name = "ratio", .field = "ratio", .kind = .float, .min = 0, .max = 1, .doc = "decimate: share of triangles to keep", .blend = "percent" },
@@ -450,6 +452,8 @@ pub const Material = struct {
     specular_ior_level: f32 = 0.5,
     specular_tint: Vec3 = .{ 1, 1, 1 },
     use_backface_culling: bool = false,
+    /// Procedural textures driving inputs, at most one per input.
+    textures: Shared(MaterialTexture) = .empty,
 
     pub const props = [_]Prop{
         .{ .name = "base_color", .field = "base_color", .kind = .color4, .unit = .factor, .min = 0, .max = 1, .doc = "Base colour, scene-linear RGBA" },
@@ -472,8 +476,61 @@ pub const Material = struct {
         .{ .name = "use_backface_culling", .field = "use_backface_culling", .kind = .bool, .doc = "Hide back faces (exports as single-sided)" },
     };
 
-    pub fn retainRefs(_: *Material) void {}
-    pub fn releaseRefs(_: *Material, _: Allocator) void {}
+    pub fn retainRefs(m: *Material) void {
+        _ = m.textures.retain();
+    }
+    pub fn releaseRefs(m: *Material, gpa: Allocator) void {
+        m.textures.release(gpa);
+    }
+
+    pub fn texture(m: *const Material, input: TextureInput) ?*const math.texture.Recipe {
+        for (m.textures.slice()) |*t| if (t.input == input) return &t.recipe;
+        return null;
+    }
+
+    /// Sets (or with null clears) the recipe of one input.
+    pub fn setTexture(m: *Material, gpa: Allocator, input: TextureInput, recipe: ?math.texture.Recipe) Allocator.Error!void {
+        const old = m.textures.slice();
+        var list: std.ArrayList(MaterialTexture) = .empty;
+        errdefer list.deinit(gpa);
+        for (old) |t| if (t.input != input) try list.append(gpa, t);
+        if (recipe) |r| try list.append(gpa, .{ .input = input, .recipe = r });
+        // Input order keeps scene.json stable whatever order they were set in.
+        std.mem.sort(MaterialTexture, list.items, {}, struct {
+            fn lt(_: void, a: MaterialTexture, b: MaterialTexture) bool {
+                return @intFromEnum(a.input) < @intFromEnum(b.input);
+            }
+        }.lt);
+        m.textures.release(gpa);
+        m.textures = try .fromOwned(gpa, try list.toOwnedSlice(gpa));
+    }
+
+    /// {input: recipe, ...}, for readback and scene.json.
+    pub fn writeTextures(m: *const Material, w: *std.json.Stringify) std.json.Stringify.Error!void {
+        try w.beginObject();
+        for (m.textures.slice()) |*t| {
+            try w.objectField(@tagName(t.input));
+            if (t.input == .normal) {
+                try w.beginObject();
+                try w.objectField("bump");
+                try math.texture.write(&t.recipe, w);
+                inline for (.{ .{ "strength", "bump_strength" }, .{ "distance", "bump_distance" }, .{ "invert", "bump_invert" } }) |kv| {
+                    try w.objectField(kv[0]);
+                    try w.write(@field(t.recipe, kv[1]));
+                }
+                try w.endObject();
+            } else try math.texture.write(&t.recipe, w);
+        }
+        try w.endObject();
+    }
+};
+
+/// Material inputs a procedural texture can drive.
+pub const TextureInput = enum(u8) { base_color, metallic, roughness, emission_color, normal };
+
+pub const MaterialTexture = struct {
+    input: TextureInput,
+    recipe: math.texture.Recipe,
 };
 
 pub const World = struct {

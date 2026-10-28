@@ -71,6 +71,9 @@ pub fn flatten(arena: Allocator, doc: *Document, ctx: Context) Error!ir.Scene {
 
     var maps: Maps = .{};
     var ev: depsgraph.Evaluator = .{ .arena = arena, .doc = doc, .cache = ctx.cache, .purpose = ctx.purpose, .stop = ctx.stop };
+    // The IR points into evaluated buffers; arena-owned ones stay valid
+    // until the arena goes, so dropping the scene references here is safe.
+    defer ev.releaseUncached();
     var meshes: std.ArrayList(ir.Mesh) = .empty;
     var cameras: std.ArrayList(ir.Camera) = .empty;
     var lights: std.ArrayList(ir.Light) = .empty;
@@ -245,6 +248,26 @@ fn materialIndex(arena: Allocator, maps: *Maps, list: *std.ArrayList(ir.Material
         .specular_ior_level = m.specular_ior_level,
         .specular_tint = m.specular_tint,
     });
+    if (m.textures.len() > 0) {
+        // Until a renderer evaluates textures per point, inputs show the
+        // texture's mean over a unit box of its coordinates.
+        const out = &list.items[list.items.len - 1];
+        const names = try arena.alloc([]const u8, m.textures.len());
+        for (m.textures.slice(), names) |*t, *nm| {
+            nm.* = @tagName(t.input);
+            const r = &t.recipe;
+            const lo: math.Vec3 = if (r.coords == .object or r.coords == .normal) .{ -1, -1, -1 } else .{ 0, 0, 0 };
+            const mean = math.texture.mean(r, lo, .{ 1, 1, 1 });
+            switch (t.input) {
+                .base_color => out.base_color = .{ mean[0], mean[1], mean[2], out.base_color[3] },
+                .emission_color => out.emission_color = .{ mean[0], mean[1], mean[2] },
+                .metallic => out.metallic = if (r.ramp.count == 0 and r.output == .value) mean[0] else math.texture.luminance(mean),
+                .roughness => out.roughness = if (r.ramp.count == 0 and r.output == .value) mean[0] else math.texture.luminance(mean),
+                .normal => {},
+            }
+        }
+        out.procedural = names;
+    }
     return gop.value_ptr.*;
 }
 
@@ -316,8 +339,10 @@ pub fn objectBounds(doc: *Document, h: IdHandle) Allocator.Error!?[2]math.Vec3 {
     var arena_state = std.heap.ArenaAllocator.init(doc.gpa);
     defer arena_state.deinit();
     var evaluated: ?*const types.Mesh = null;
+    var ev: depsgraph.Evaluator = .{ .arena = arena_state.allocator(), .doc = doc, .cache = null, .purpose = .render };
+    // After the bounds below have read the evaluated mesh.
+    defer ev.releaseUncached();
     if (ob.kind == .mesh and depsgraph.hasActive(ob, .render)) {
-        var ev: depsgraph.Evaluator = .{ .arena = arena_state.allocator(), .doc = doc, .cache = null, .purpose = .render };
         if (ev.evaluate(h) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.DeadlineExceeded => null,

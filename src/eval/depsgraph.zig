@@ -60,6 +60,17 @@ pub const Evaluator = struct {
     done: std.AutoHashMapUnmanaged(u32, ?Result) = .empty,
     visiting: std.AutoHashMapUnmanaged(u32, void) = .empty,
 
+    /// Without a cache, evaluated meshes are copies in the arena that still
+    /// hold references to the scene's mesh buffers (modifiers such as
+    /// displace share them); this drops those references. Call it when the
+    /// results are no longer read. With a cache, the cache owns them.
+    pub fn releaseUncached(e: *Evaluator) void {
+        if (e.cache != null) return;
+        var it = e.done.valueIterator();
+        while (it.next()) |r| if (r.*) |res| @constCast(res.mesh).releaseRefs(e.arena);
+        e.done.clearRetainingCapacity();
+    }
+
     /// The evaluated mesh of mesh object `h`, or null for other objects
     /// and missing data.
     pub fn evaluate(e: *Evaluator, h: IdHandle) Error!?Result {
@@ -155,9 +166,22 @@ fn hashModifier(h: *Wyhash, md: *const Modifier) void {
                 const id: [2]u32 = if (x) |t| .{ t.index, t.generation } else .{ std.math.maxInt(u32), 0 };
                 h.update(std.mem.asBytes(&id));
             },
-            .@"struct" => h.update(x.slice()),
+            .@"struct" => if (f.type == math.texture.Recipe) hashFields(h, x) else h.update(x.slice()),
             else => @compileError("hashModifier: unhandled field " ++ f.name),
         }
+    }
+}
+
+/// Hashes plain data field by field, so padding bytes never count.
+fn hashFields(h: *Wyhash, x: anytype) void {
+    const T = @TypeOf(x);
+    switch (@typeInfo(T)) {
+        .bool => h.update(&.{@intFromBool(x)}),
+        .int, .float => h.update(std.mem.asBytes(&x)),
+        .@"enum" => h.update(std.mem.asBytes(&@intFromEnum(x))),
+        .array => for (x) |e| hashFields(h, e),
+        .@"struct" => inline for (std.meta.fields(T)) |f| hashFields(h, @field(x, f.name)),
+        else => @compileError("hashFields: unhandled type " ++ @typeName(T)),
     }
 }
 

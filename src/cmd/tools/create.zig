@@ -17,6 +17,7 @@ const Mesh = core.types.Mesh;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
 const sdf = geom.sdf;
+const shading = @import("shading.zig");
 
 /// Per call; larger meshes go through io.import (PLY), which streams.
 pub const max_vertices = 200_000;
@@ -57,6 +58,7 @@ pub const tools = [_]Tool{
             .{ .name = "relief_count", .type = .{ .integer = .{ .min = 0, .max = 1024 } }, .doc = "Strips per full turn", .default = .{ .integer = 0 } },
             .{ .name = "relief_depth", .type = .{ .number = .{ .min = -10, .max = 10, .unit = .metres } }, .doc = "Strip height", .default = .{ .number = 0 } },
             .{ .name = "relief_groove", .type = .{ .number = .{ .min = 0, .max = 10, .unit = .metres } }, .doc = "Centre-line depth", .default = .{ .number = 0 } },
+            .{ .name = "relief_texture", .type = .{ .properties = writeObjectSchema }, .doc = "Recipe (as material.create) offsetting radii by relief_depth x (value - 0.5), instead of strips" },
             .{ .name = "cap_start", .type = .boolean, .doc = "Fill the first ring", .default = .{ .boolean = false } },
             .{ .name = "cap_end", .type = .boolean, .doc = "Fill the last ring", .default = .{ .boolean = false } },
             .{ .name = "smooth", .type = .boolean, .doc = "Smooth shading", .default = .{ .boolean = true } },
@@ -71,7 +73,7 @@ pub const tools = [_]Tool{
     .{
         .name = "mesh.from_sdf",
         .title = "Mesh from SDF",
-        .description = "Model with blended shapes, meshed in one call (smooth organic forms: heads, hair, armour). steps run in order; each {op: add|subtract|intersect, blend: smooth radius m (0 = hard), offset: grow m, slot: material slot, and shape or steps (a group)}. shape {type, location, rotation (deg), scale (uniform), mirror_x} plus: sphere radius; ellipsoid radii [x,y,z]; box size [x,y,z], round; capsule a, b, radius or radii [ra, rb]; torus major_radius, minor_radius, stretch [sx, sy]; cylinder radius, depth (along Z); half_space normal (removes nothing on its own; everything below the plane through location); chain points [[x,y,z]...], radius or radii per point (tubes, locks of hair). voxel_size sets detail: cells = volume / voxel_size^3, at most 64M. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"name\":\"Pebble\",\"voxel_size\":0.01,\"steps\":[{\"shape\":{\"type\":\"ellipsoid\",\"radii\":[0.3,0.2,0.12]}},{\"blend\":0.05,\"shape\":{\"type\":\"capsule\",\"a\":[0,0,0.1],\"b\":[0,0,0.3],\"radius\":0.04}},{\"op\":\"subtract\",\"blend\":0.02,\"shape\":{\"type\":\"sphere\",\"radius\":0.08,\"location\":[0.2,0,0.1]}}]}.",
+        .description = "Model with blended shapes, meshed in one call (smooth organic forms: heads, hair, armour). steps run in order; each {op: add|subtract|intersect, blend: smooth radius m (0 = hard), offset: grow m, slot: material slot, displace {amount m, texture: a material.create recipe}, and shape or steps (a group)}. shape {type, location, rotation (deg), scale (uniform), mirror_x} plus: sphere radius; ellipsoid radii [x,y,z]; box size [x,y,z], round; capsule a, b, radius or radii [ra, rb]; torus major_radius, minor_radius, stretch [sx, sy]; cylinder radius, depth (along Z); half_space normal (removes nothing on its own; everything below the plane through location); chain points [[x,y,z]...], radius or radii per point (tubes, locks of hair). voxel_size sets detail: cells = volume / voxel_size^3, at most 64M. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"name\":\"Pebble\",\"voxel_size\":0.01,\"steps\":[{\"shape\":{\"type\":\"ellipsoid\",\"radii\":[0.3,0.2,0.12]}},{\"blend\":0.05,\"shape\":{\"type\":\"capsule\",\"a\":[0,0,0.1],\"b\":[0,0,0.3],\"radius\":0.04}},{\"op\":\"subtract\",\"blend\":0.02,\"shape\":{\"type\":\"sphere\",\"radius\":0.08,\"location\":[0.2,0,0.1]}}]}.",
         .params = common.mutating(&.{
             common.name,
             .{ .name = "steps", .type = .{ .objects = .{ .max_items = 4096 } }, .doc = "Shapes and groups, in order", .required = true },
@@ -88,6 +90,13 @@ pub const tools = [_]Tool{
         .handler = fromSdf,
     },
 };
+
+fn writeObjectSchema(w: *std.json.Stringify) std.json.Stringify.Error!void {
+    try w.beginObject();
+    try w.objectField("type");
+    try w.write("object");
+    try w.endObject();
+}
 
 pub const max_shapes = 20_000;
 pub const max_chain_points = 200_000;
@@ -150,7 +159,7 @@ const Parser = struct {
     }
 
     fn step(p: *Parser, o: ObjectMap, path: []const u8, depth: u32) HandlerError!sdf.Step {
-        try p.onlyKeys(o, path, &.{ "op", "blend", "offset", "slot", "shape", "steps" });
+        try p.onlyKeys(o, path, &.{ "op", "blend", "offset", "slot", "shape", "steps", "displace" });
         var st: sdf.Step = .{ .body = undefined };
         if (o.get("op")) |op| {
             st.op = (if (op == .string) std.meta.stringToEnum(sdf.Op, op.string) else null) orelse
@@ -159,6 +168,17 @@ const Parser = struct {
         st.blend = try p.num(o, "blend", path, 0, 0, 100);
         st.offset = try p.num(o, "offset", path, 0, -100, 100);
         if (o.get("slot") != null) st.slot = @intFromFloat(try p.num(o, "slot", path, 0, 0, 255));
+        if (o.get("displace")) |dv| {
+            const dp = try p.at(path, "displace");
+            if (dv != .object) return p.bad(dp, "", "'displace' must be {{amount, texture}}", .{});
+            try p.onlyKeys(dv.object, dp, &.{ "amount", "texture" });
+            st.displace_amount = try p.num(dv.object, "amount", dp, null, -10, 10);
+            const tv = dv.object.get("texture") orelse return p.bad(try p.at(dp, "texture"), "", "missing 'texture' (a material.create recipe)", .{});
+            if (tv != .object) return p.bad(try p.at(dp, "texture"), "", "'texture' must be a recipe object", .{});
+            const r = try p.c.arena.create(math.texture.Recipe);
+            r.* = try shading.parseRecipe(p.c, tv.object, try p.at(dp, "texture"));
+            st.displace = r;
+        }
         const shape_v = o.get("shape");
         const group = o.get("steps");
         if ((shape_v == null) == (group == null)) return p.bad(path, "a step holds either a shape or a group of steps", "need exactly one of 'shape' and 'steps'", .{});
@@ -385,6 +405,8 @@ fn revolve(c: *Call) HandlerError!void {
     const end = a.float("angle_end").?;
     if (!(end > start) or end - start > 360.0001) return c.failAt(.invalid_argument, "/angle_end", "angle_end must be above angle_start by at most 360", &.{}, "the sweep is {d} degrees", .{end - start});
     const segments: u32 = @intCast(a.int("segments").?);
+    var relief_texture: ?math.texture.Recipe = null;
+    if (a.value("relief_texture")) |rv| relief_texture = try shading.parseRecipe(c, rv.object, "/relief_texture");
     const relief: geom.revolve.Relief = .{
         .count = @intCast(a.int("relief_count").?),
         .depth = a.float("relief_depth").?,
@@ -403,6 +425,7 @@ fn revolve(c: *Call) HandlerError!void {
         .angle_start = math.vec.degToRad(start),
         .angle_end = math.vec.degToRad(end),
         .relief = relief,
+        .relief_texture = if (relief_texture) |*r| r else null,
         .cap_start = a.boolean("cap_start").?,
         .cap_end = a.boolean("cap_end").?,
         .smooth = a.boolean("smooth").?,

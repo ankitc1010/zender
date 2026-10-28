@@ -142,6 +142,10 @@ pub fn write(arena: Allocator, doc: *Document, w: *Stringify, opts: Options) Err
                 try writeRef(w, db, .object, m.target);
                 try w.objectField("properties");
                 try registry.writeStoredValues(types.Modifier, m, w);
+                if (m.texture == .recipe) {
+                    try w.objectField("texture_recipe");
+                    try math.texture.write(&m.recipe, w);
+                }
                 try w.endObject();
             }
             try w.endArray();
@@ -162,7 +166,22 @@ pub fn write(arena: Allocator, doc: *Document, w: *Stringify, opts: Options) Err
 
     try writeSimple(arena, w, db, .camera, "cameras");
     try writeSimple(arena, w, db, .light, "lights");
-    try writeSimple(arena, w, db, .material, "materials");
+    try w.objectField("materials");
+    try w.beginArray();
+    for (try sorted(arena, db, .material)) |h| {
+        const m = db.get(.material, h).?;
+        try w.beginObject();
+        try w.objectField("name");
+        try w.write(m.name.slice());
+        try w.objectField("properties");
+        try registry.writeStoredValues(types.Material, m, w);
+        if (m.textures.len() > 0) {
+            try w.objectField("textures");
+            try m.writeTextures(w);
+        }
+        try w.endObject();
+    }
+    try w.endArray();
     try writeSimple(arena, w, db, .world, "worlds");
     try w.endObject();
 }

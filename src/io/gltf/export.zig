@@ -295,6 +295,10 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
         if (hasSpecular(m)) uses_specular = true;
         if (m.coat_weight > 0 and !isWhite(m.coat_tint))
             try dropped.append(arena, try std.fmt.allocPrint(arena, "coat tint of material '{s}' (KHR_materials_clearcoat has no tint)", .{m.name}));
+        if (m.procedural.len > 0) {
+            const list = try std.mem.join(arena, ", ", m.procedural);
+            try dropped.append(arena, try std.fmt.allocPrint(arena, "procedural {s} of material '{s}' (exported as the texture's mean; bake it with material.bake)", .{ list, m.name }));
+        }
         if (m.coat_weight > 0 and m.coat_ior != 1.5)
             try dropped.append(arena, try std.fmt.allocPrint(arena, "coat IOR of material '{s}' (KHR_materials_clearcoat assumes 1.5)", .{m.name}));
     }
