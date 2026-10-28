@@ -4,6 +4,7 @@ const std = @import("std");
 const engine = @import("engine");
 const server = @import("../server.zig");
 const common = @import("common.zig");
+const mesh_tools = @import("mesh.zig");
 
 const core = engine.core;
 const Call = server.Call;
@@ -41,11 +42,12 @@ pub const tools = [_]Tool{
     .{
         .name = "material.assign",
         .title = "Assign material",
-        .description = "Put a material in a slot of each listed mesh object (slot 0 covers faces with material index 0, which is all faces of a primitive). Shared mesh data shares slots. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"objects\":[\"Table Top\",\"Leg\"],\"material\":\"Oak\"}.",
+        .description = "Put a material in a slot of each listed mesh object (slot 0 covers faces with material index 0, which is all faces of a primitive). Shared mesh data shares slots. With selector (one object only) the selected faces also move to that slot, so one mesh can carry several materials. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"objects\":[\"Crown\"],\"material\":\"Tan\",\"slot\":1,\"selector\":{\"where\":\"z > 0.14\"}}.",
         .params = common.mutating(&.{
             .{ .name = "objects", .type = .{ .string_list = .{} }, .doc = "Mesh objects", .required = true },
             .{ .name = "material", .type = .{ .name_ref = .{ .nullable = true } }, .doc = "Material, or null to empty the slot", .required = true },
             .{ .name = "slot", .type = .{ .integer = .{ .min = 0, .max = 255 } }, .doc = "Material slot index", .default = .{ .integer = 0 } },
+            mesh_tools.selectorParam("face", false),
         }),
         .kind = .mutating,
         .handler = assign,
@@ -92,12 +94,22 @@ fn assign(c: *Call) HandlerError!void {
     const mat: ?core.IdHandle = if (c.args.str("material")) |m| try c.lookup(.material, m, "/material") else null;
     const slot: usize = @intCast(c.args.int("slot").?);
     const names = c.args.strings("objects");
+    if (c.args.value("selector") != null and names.len != 1)
+        return c.failAt(.invalid_argument, "/objects", "call once per object when assigning faces", &.{}, "a selector applies to one object, got {d}", .{names.len});
     for (names, 0..) |n, i| {
         const path = try std.fmt.allocPrint(c.arena, "/objects/{d}", .{i});
         const h = try c.lookup(.object, n.string, path);
         const ob = doc.db.get(.object, h).?;
         if (ob.kind != .mesh) return c.failAt(.invalid_argument, path, "materials go on mesh objects", &.{}, "'{s}' is a {s}, not a mesh", .{ ob.name.slice(), @tagName(ob.kind) });
         core.edit.assignMaterial(doc, h, mat, slot) catch return error.OutOfMemory;
+        if (c.args.value("selector") != null) {
+            const faces = try mesh_tools.selectedFaces(c, h);
+            core.edit.setFaceMaterial(doc, h, faces, @intCast(slot)) catch |err| switch (err) {
+                error.TooManyAttributes => return c.failAt(.invalid_operation, "/objects/0", "remove an attribute first", &.{}, "'{s}' already has the maximum number of attributes", .{ob.name.slice()}),
+                else => return error.OutOfMemory,
+            };
+            try c.say("Moved {d} face(s) of '{s}' to slot {d}.", .{ faces.len, ob.name.slice(), slot });
+        }
         try c.markChanged(h, ob.name.slice());
         if (ob.data) |d| if (core.edit.userCount(&doc.db, d) > 1) {
             try c.warn("'{s}' shares its mesh with other objects; they changed too", .{ob.name.slice()});

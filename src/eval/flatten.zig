@@ -217,6 +217,15 @@ fn materialIndex(arena: Allocator, maps: *Maps, list: *std.ArrayList(ir.Material
         .emission_strength = m.emission_strength,
         .alpha = m.alpha,
         .double_sided = !m.use_backface_culling,
+        .coat_weight = m.coat_weight,
+        .coat_roughness = m.coat_roughness,
+        .coat_ior = m.coat_ior,
+        .coat_tint = m.coat_tint,
+        .sheen_weight = m.sheen_weight,
+        .sheen_roughness = m.sheen_roughness,
+        .sheen_tint = m.sheen_tint,
+        .specular_ior_level = m.specular_ior_level,
+        .specular_tint = m.specular_tint,
     });
     return gop.value_ptr.*;
 }

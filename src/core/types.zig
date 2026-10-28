@@ -440,6 +440,15 @@ pub const Material = struct {
     transmission: f32 = 0,
     emission_color: Vec3 = .{ 1, 1, 1 },
     emission_strength: f32 = 0,
+    coat_weight: f32 = 0,
+    coat_roughness: f32 = 0.03,
+    coat_ior: f32 = 1.5,
+    coat_tint: Vec3 = .{ 1, 1, 1 },
+    sheen_weight: f32 = 0,
+    sheen_roughness: f32 = 0.5,
+    sheen_tint: Vec3 = .{ 1, 1, 1 },
+    specular_ior_level: f32 = 0.5,
+    specular_tint: Vec3 = .{ 1, 1, 1 },
     use_backface_culling: bool = false,
 
     pub const props = [_]Prop{
@@ -451,6 +460,15 @@ pub const Material = struct {
         .{ .name = "transmission", .field = "transmission", .kind = .float, .unit = .factor, .min = 0, .max = 1, .doc = "Transmission weight (glass)" },
         .{ .name = "emission_color", .field = "emission_color", .kind = .color3, .unit = .factor, .min = 0, .max = 1, .doc = "Emission colour, scene-linear RGB" },
         .{ .name = "emission_strength", .field = "emission_strength", .kind = .float, .min = 0, .max = 1e6, .doc = "Emission strength; 0 = none" },
+        .{ .name = "coat_weight", .field = "coat_weight", .kind = .float, .unit = .factor, .min = 0, .max = 1, .doc = "Clear coat layer over the base" },
+        .{ .name = "coat_roughness", .field = "coat_roughness", .kind = .float, .unit = .factor, .min = 0, .max = 1, .doc = "Coat roughness" },
+        .{ .name = "coat_ior", .field = "coat_ior", .kind = .float, .min = 1, .max = 4, .doc = "Coat index of refraction" },
+        .{ .name = "coat_tint", .field = "coat_tint", .kind = .color3, .unit = .factor, .min = 0, .max = 1, .doc = "Coat colour, scene-linear RGB" },
+        .{ .name = "sheen_weight", .field = "sheen_weight", .kind = .float, .unit = .factor, .min = 0, .max = 1, .doc = "Sheen layer (cloth, velvet)" },
+        .{ .name = "sheen_roughness", .field = "sheen_roughness", .kind = .float, .unit = .factor, .min = 0, .max = 1, .doc = "Sheen roughness" },
+        .{ .name = "sheen_tint", .field = "sheen_tint", .kind = .color3, .unit = .factor, .min = 0, .max = 1, .doc = "Sheen colour, scene-linear RGB" },
+        .{ .name = "specular_ior_level", .field = "specular_ior_level", .kind = .float, .unit = .factor, .min = 0, .max = 1, .doc = "Dielectric specular level; 0.5 = as the IOR gives" },
+        .{ .name = "specular_tint", .field = "specular_tint", .kind = .color3, .unit = .factor, .min = 0, .max = 1, .doc = "Dielectric specular colour, scene-linear RGB" },
         .{ .name = "use_backface_culling", .field = "use_backface_culling", .kind = .bool, .doc = "Hide back faces (exports as single-sided)" },
     };
 

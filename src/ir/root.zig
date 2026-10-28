@@ -97,6 +97,15 @@ pub const Material = struct {
     emission_strength: f32,
     alpha: f32,
     double_sided: bool,
+    coat_weight: f32 = 0,
+    coat_roughness: f32 = 0.03,
+    coat_ior: f32 = 1.5,
+    coat_tint: Vec3 = .{ 1, 1, 1 },
+    sheen_weight: f32 = 0,
+    sheen_roughness: f32 = 0.5,
+    sheen_tint: Vec3 = .{ 1, 1, 1 },
+    specular_ior_level: f32 = 0.5,
+    specular_tint: Vec3 = .{ 1, 1, 1 },
 };
 
 pub const Projection = enum { perspective, orthographic };

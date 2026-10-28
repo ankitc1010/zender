@@ -282,11 +282,21 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
     var uses_emissive_strength = false;
     var uses_ior = false;
     var uses_transmission = false;
+    var uses_clearcoat = false;
+    var uses_sheen = false;
+    var uses_specular = false;
     for (mats.items) |mi| {
         const m = scene.materials[mi];
         if (m.emission_strength > 0 and m.emission_strength != 1) uses_emissive_strength = true;
         if (m.ior != 1.5) uses_ior = true;
         if (m.transmission > 0) uses_transmission = true;
+        if (m.coat_weight > 0) uses_clearcoat = true;
+        if (m.sheen_weight > 0) uses_sheen = true;
+        if (hasSpecular(m)) uses_specular = true;
+        if (m.coat_weight > 0 and !isWhite(m.coat_tint))
+            try dropped.append(arena, try std.fmt.allocPrint(arena, "coat tint of material '{s}' (KHR_materials_clearcoat has no tint)", .{m.name}));
+        if (m.coat_weight > 0 and m.coat_ior != 1.5)
+            try dropped.append(arena, try std.fmt.allocPrint(arena, "coat IOR of material '{s}' (KHR_materials_clearcoat assumes 1.5)", .{m.name}));
     }
 
     var json: Writer.Allocating = .init(arena);
@@ -305,6 +315,9 @@ pub fn write(arena: Allocator, scene: ir.Scene, opts: Options, out: *Writer) (Al
     if (uses_emissive_strength) try ext_used.append(arena, "KHR_materials_emissive_strength");
     if (uses_ior) try ext_used.append(arena, "KHR_materials_ior");
     if (uses_transmission) try ext_used.append(arena, "KHR_materials_transmission");
+    if (uses_clearcoat) try ext_used.append(arena, "KHR_materials_clearcoat");
+    if (uses_sheen) try ext_used.append(arena, "KHR_materials_sheen");
+    if (uses_specular) try ext_used.append(arena, "KHR_materials_specular");
     if (ext_used.items.len > 0) {
         try w.objectField("extensionsUsed");
         try w.write(ext_used.items);
@@ -574,6 +587,14 @@ fn chunkHeader(out: *Writer, len: usize, kind: u32) Writer.Error!void {
     try out.writeAll(&h);
 }
 
+fn isWhite(c: [3]f32) bool {
+    return c[0] == 1 and c[1] == 1 and c[2] == 1;
+}
+
+fn hasSpecular(m: ir.Material) bool {
+    return m.specular_ior_level != 0.5 or !isWhite(m.specular_tint);
+}
+
 fn writeMaterial(w: *Stringify, m: ir.Material) !void {
     try w.beginObject();
     try w.objectField("name");
@@ -600,7 +621,7 @@ fn writeMaterial(w: *Stringify, m: ir.Material) !void {
         try w.write(true);
     }
     const strength = m.emission_strength > 0 and m.emission_strength != 1;
-    if (strength or m.ior != 1.5 or m.transmission > 0) {
+    if (strength or m.ior != 1.5 or m.transmission > 0 or m.coat_weight > 0 or m.sheen_weight > 0 or hasSpecular(m)) {
         try w.objectField("extensions");
         try w.beginObject();
         if (strength) {
@@ -622,6 +643,38 @@ fn writeMaterial(w: *Stringify, m: ir.Material) !void {
             try w.beginObject();
             try w.objectField("transmissionFactor");
             try writeF32(w, m.transmission);
+            try w.endObject();
+        }
+        if (m.coat_weight > 0) {
+            try w.objectField("KHR_materials_clearcoat");
+            try w.beginObject();
+            try w.objectField("clearcoatFactor");
+            try writeF32(w, m.coat_weight);
+            try w.objectField("clearcoatRoughnessFactor");
+            try writeF32(w, m.coat_roughness);
+            try w.endObject();
+        }
+        if (m.sheen_weight > 0) {
+            // glTF sheen has no separate weight; it scales the colour.
+            try w.objectField("KHR_materials_sheen");
+            try w.beginObject();
+            try w.objectField("sheenColorFactor");
+            try f32Array(w, &.{ m.sheen_tint[0] * m.sheen_weight, m.sheen_tint[1] * m.sheen_weight, m.sheen_tint[2] * m.sheen_weight });
+            try w.objectField("sheenRoughnessFactor");
+            try writeF32(w, m.sheen_roughness);
+            try w.endObject();
+        }
+        if (hasSpecular(m)) {
+            // Specular IOR Level 0.5 leaves F0 as the IOR gives it, which is
+            // glTF's specularFactor 1; above 0.5 the boost moves to the colour.
+            const level = 2 * m.specular_ior_level;
+            const boost = @max(1, level);
+            try w.objectField("KHR_materials_specular");
+            try w.beginObject();
+            try w.objectField("specularFactor");
+            try writeF32(w, @min(1, level));
+            try w.objectField("specularColorFactor");
+            try f32Array(w, &.{ m.specular_tint[0] * boost, m.specular_tint[1] * boost, m.specular_tint[2] * boost });
             try w.endObject();
         }
         try w.endObject();

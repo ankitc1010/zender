@@ -27,7 +27,7 @@ const v = math.vec;
 
 const object_param: Param = .{ .name = "object", .type = .{ .name_ref = .{} }, .doc = "Mesh object", .required = true };
 
-fn selectorParam(comptime domain: []const u8, comptime required: bool) Param {
+pub fn selectorParam(comptime domain: []const u8, comptime required: bool) Param {
     return .{
         .name = "selector",
         .type = .selector,
@@ -248,7 +248,17 @@ const Target = struct {
 };
 
 fn target(c: *Call) HandlerError!Target {
-    const oh = try c.object("object");
+    return targetFor(c, try c.object("object"));
+}
+
+/// The faces the call's `selector` picks on mesh object `oh`, sorted; an
+/// error result when it picks none.
+pub fn selectedFaces(c: *Call, oh: IdHandle) HandlerError![]u32 {
+    const t = try targetFor(c, oh);
+    return faceList(c, t, try evaluate(c, t, .face, false));
+}
+
+fn targetFor(c: *Call, oh: IdHandle) HandlerError!Target {
     const doc = c.doc();
     const ob = doc.db.get(.object, oh).?;
     const mh = (if (ob.kind == .mesh) ob.data else null) orelse {

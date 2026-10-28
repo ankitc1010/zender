@@ -360,6 +360,22 @@ pub fn assignMaterial(doc: *Document, ob_h: IdHandle, material: ?IdHandle, slot:
     mesh.materials = try .fromOwned(doc.gpa, items);
 }
 
+/// Moves faces (sorted indices) of a mesh object to material slot `slot`
+/// through the face attribute `material_index`, created at 0 if missing.
+pub fn setFaceMaterial(doc: *Document, ob_h: IdHandle, faces: []const u32, slot: i32) (EditError || error{TooManyAttributes})!void {
+    const ob = doc.db.get(.object, ob_h) orelse return error.StaleHandle;
+    if (ob.kind != .mesh) return error.WrongType;
+    const mesh = doc.db.get(.mesh, ob.data orelse return error.StaleHandle) orelse return error.StaleHandle;
+    const items = try doc.gpa.alloc(i32, mesh.faceCount());
+    @memset(items, 0);
+    if (mesh.attribute("material_index")) |a| {
+        if (a.domain == .face and a.data == .int) @memcpy(items, a.data.int.slice());
+    }
+    for (faces) |f| items[f] = slot;
+    // fromOwned takes items; setAttribute releases them if it fails.
+    try mesh.setAttribute(doc.gpa, "material_index", .face, .{ .int = try .fromOwned(doc.gpa, items) });
+}
+
 /// Number of objects whose data is `h`.
 pub fn userCount(db: *Database, h: IdHandle) u32 {
     var n: u32 = 0;

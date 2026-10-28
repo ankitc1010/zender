@@ -651,3 +651,39 @@ test "mesh edits replay byte-identically and do not depend on threads" {
         try testing.expectEqualSlices(u8, bytes, try f.tmp.dir.readFileAlloc(testing.io, again, arena, .limited(1 << 22)));
     }
 }
+
+test "coat, sheen and per-face material slots reach glTF" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Blue Metal\",\"properties\":{{\"base_color\":[0.025,0.07,0.34],\"metallic\":1,\"coat_weight\":0.6,\"coat_roughness\":0.04,\"coat_tint\":[0.75,0.85,1]}}}}", .{id}));
+    _ = try f.ok("material.create", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Velvet\",\"properties\":{{\"sheen_weight\":0.5,\"specular_ior_level\":0.25}}}}", .{id}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\",\"material\":\"Blue Metal\"}}", .{id}));
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Other\",\"location\":[3,0,0]}}", .{id}));
+    // A selector picks faces of one object only.
+    const two = try f.call("material.assign", try f.fmt("{{\"scene_id\":\"{s}\",\"objects\":[\"Box\",\"Other\"],\"material\":\"Velvet\",\"selector\":{{}}}}", .{id}));
+    try testing.expectEqualStrings("/objects", two.tool_error.path);
+    _ = try f.ok("material.assign", try f.fmt("{{\"scene_id\":\"{s}\",\"objects\":[\"Box\"],\"material\":\"Velvet\",\"slot\":1,\"selector\":{{\"normal\":[0,0,1]}}}}", .{id}));
+    const top = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"selector\":{{\"where\":\"material_index == 1\"}}}}", .{id}));
+    try testing.expectEqual(@as(i64, 1), top.object.get("count").?.integer);
+
+    const out = try f.ok("io.export", try f.fmt("{{\"scene_id\":\"{s}\",\"path\":\"box.gltf\"}}", .{id}));
+    // The coat tint has no glTF home and is reported.
+    const dropped = out.object.get("dropped").?.array.items;
+    try testing.expectEqual(@as(usize, 1), dropped.len);
+    try testing.expect(std.mem.indexOf(u8, dropped[0].string, "coat tint") != null);
+    const text = try f.tmp.dir.readFileAlloc(testing.io, "box.gltf", f.arena_state.allocator(), .limited(1 << 22));
+    for ([_][]const u8{ "\"KHR_materials_clearcoat\"", "\"clearcoatFactor\":0.6", "\"KHR_materials_sheen\"", "\"specularFactor\":0.5" }) |needle| {
+        if (std.mem.indexOf(u8, text, needle) == null) {
+            std.debug.print("missing {s}\n", .{needle});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // Both slots of Box are used, so it splits into two primitives.
+    const gltf = try std.json.parseFromSliceLeaky(Value, f.arena_state.allocator(), text, .{});
+    const meshes = gltf.object.get("meshes").?.array.items;
+    var prims: usize = 0;
+    for (meshes) |m| prims += m.object.get("primitives").?.array.items.len;
+    try testing.expectEqual(@as(usize, 3), prims);
+}
