@@ -50,6 +50,8 @@ pub const Type = union(enum) {
     tuples: struct { width: u8 = 0, integer: bool = false, min: ?f64 = null, max_items: usize = 4096 },
     /// A flat list of numbers.
     numbers: struct { integer: bool = false, min: ?f64 = null, max_items: usize = 4096 },
+    /// A list of JSON objects whose members the handler checks.
+    objects: struct { max_items: usize = 256 },
     /// Datablock name, or null where `nullable`.
     name_ref: struct { nullable: bool = false },
     /// Free-form object whose schema comes from the property registry;
@@ -241,6 +243,17 @@ fn writeParamSchema(p: Param, w: *Stringify) Stringify.Error!void {
                 try w.objectField("maxItems");
                 try w.write(t.width);
             }
+            try w.endObject();
+            try w.objectField("maxItems");
+            try w.write(t.max_items);
+        },
+        .objects => |t| {
+            try w.objectField("type");
+            try w.write("array");
+            try w.objectField("items");
+            try w.beginObject();
+            try w.objectField("type");
+            try w.write("object");
             try w.endObject();
             try w.objectField("maxItems");
             try w.write(t.max_items);
@@ -567,6 +580,12 @@ fn check(arena: Allocator, p: Param, val: Value, failure: *Failure) Allocator.Er
                 }
                 for (tup, 0..) |x, k| if (try badNumber(arena, failure, p, x, t.integer, t.min, try std.fmt.allocPrint(arena, "/{d}/{d}", .{ i, k }))) return null;
             }
+            return val;
+        },
+        .objects => |t| {
+            const arr = if (val == .array) val.array.items else return fail(arena, failure, p, "", "'{s}' must be a list of objects", .{p.name});
+            if (arr.len == 0 or arr.len > t.max_items) return fail(arena, failure, p, "", "'{s}' needs 1 to {d} items", .{ p.name, t.max_items });
+            for (arr, 0..) |item, i| if (item != .object) return fail(arena, failure, p, try std.fmt.allocPrint(arena, "/{d}", .{i}), "'{s}' items must be objects", .{p.name});
             return val;
         },
         .numbers => |t| {

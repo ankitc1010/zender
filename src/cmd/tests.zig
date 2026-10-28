@@ -717,3 +717,28 @@ test "mesh.from_data and mesh.revolve build objects and reject bad input" {
     const inner_pole = try f.call("mesh.revolve", try f.fmt("{{\"scene_id\":\"{s}\",\"profile\":[[0,1],[1,0],[2,1]]}}", .{id}));
     try testing.expectEqualStrings("/profile/1/1", inner_pole.tool_error.path);
 }
+
+test "mesh.from_sdf models blended shapes with slots and precise errors" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    const pebble = try f.ok("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Pebble\",\"voxel_size\":0.02,\"steps\":[{{\"shape\":{{\"type\":\"ellipsoid\",\"radii\":[0.3,0.2,0.12]}}}},{{\"blend\":0.05,\"slot\":1,\"shape\":{{\"type\":\"capsule\",\"a\":[0,0,0.1],\"b\":[0,0,0.3],\"radius\":0.04}}}},{{\"op\":\"subtract\",\"blend\":0.02,\"shape\":{{\"type\":\"sphere\",\"radius\":0.08,\"location\":[0.2,0,0.1]}}}},{{\"steps\":[{{\"shape\":{{\"type\":\"chain\",\"points\":[[0.2,0.1,0],[0.3,0.2,0.05],[0.35,0.2,0.15]],\"radius\":0.02,\"mirror_x\":true}}}}]}}],\"location\":[0,0,1]}}", .{id}));
+    try testing.expectEqualStrings("Pebble", pebble.object.get("object").?.object.get("name").?.string);
+    // The handle's faces carry slot 1, the body slot 0.
+    const handle = try f.ok("mesh.select_preview", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Pebble\",\"selector\":{{\"where\":\"material_index == 1\"}}}}", .{id}));
+    try testing.expect(handle.object.get("count").?.integer > 10);
+    const top = handle.object.get("bounds").?.object.get("max").?.array.items[2];
+    try testing.expect(schemaNumber(top) > 1.3);
+
+    const typo = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"steps\":[{{\"shape\":{{\"type\":\"sphere\",\"radious\":1}}}}]}}", .{id}));
+    try testing.expectEqualStrings("/steps/0/shape/radious", typo.tool_error.path);
+    const no_type = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"steps\":[{{\"steps\":[{{\"shape\":{{\"radius\":1}}}}]}}]}}", .{id}));
+    try testing.expectEqualStrings("/steps/0/steps/0/shape/type", no_type.tool_error.path);
+    const unbounded = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"steps\":[{{\"shape\":{{\"type\":\"half_space\",\"normal\":[0,0,1]}}}}]}}", .{id}));
+    try testing.expectEqualStrings("/steps", unbounded.tool_error.path);
+    // With bounds a half-space is fine: a 1 m slab.
+    _ = try f.ok("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"name\":\"Slab\",\"voxel_size\":0.1,\"bounds_min\":[-1,-1,-1],\"bounds_max\":[1,1,1],\"steps\":[{{\"shape\":{{\"type\":\"half_space\",\"normal\":[0,0,1]}}}},{{\"op\":\"intersect\",\"shape\":{{\"type\":\"box\",\"size\":[1,1,1]}}}}]}}", .{id}));
+    const huge = try f.call("mesh.from_sdf", try f.fmt("{{\"scene_id\":\"{s}\",\"voxel_size\":0.001,\"steps\":[{{\"shape\":{{\"type\":\"sphere\",\"radius\":1}}}}]}}", .{id}));
+    try testing.expectEqualStrings("/voxel_size", huge.tool_error.path);
+}

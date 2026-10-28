@@ -5,6 +5,7 @@ pub const build = @import("build.zig");
 pub const normals = @import("normals.zig");
 pub const primitives = @import("primitives.zig");
 pub const revolve = @import("revolve.zig");
+pub const sdf = @import("sdf.zig");
 pub const editmesh = @import("editmesh.zig");
 pub const EditMesh = editmesh.EditMesh;
 pub const select = @import("select.zig");
@@ -17,6 +18,7 @@ test {
     _ = normals;
     _ = primitives;
     _ = revolve;
+    _ = sdf;
     _ = editmesh;
     _ = select;
     _ = ops;

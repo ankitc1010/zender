@@ -1,5 +1,5 @@
 //! Tools that build a new mesh object from data rather than a primitive:
-//! mesh.from_data and mesh.revolve.
+//! mesh.from_data, mesh.revolve and mesh.from_sdf.
 
 const std = @import("std");
 const math = @import("math");
@@ -14,6 +14,9 @@ const Call = server.Call;
 const Tool = server.Tool;
 const HandlerError = server.HandlerError;
 const Mesh = core.types.Mesh;
+const Value = std.json.Value;
+const ObjectMap = std.json.ObjectMap;
+const sdf = geom.sdf;
 
 /// Per call; larger meshes go through io.import (PLY), which streams.
 pub const max_vertices = 200_000;
@@ -65,6 +68,249 @@ pub const tools = [_]Tool{
         .kind = .mutating,
         .handler = revolve,
     },
+    .{
+        .name = "mesh.from_sdf",
+        .title = "Mesh from SDF",
+        .description = "Model with blended shapes, meshed in one call (smooth organic forms: heads, hair, armour). steps run in order; each {op: add|subtract|intersect, blend: smooth radius m (0 = hard), offset: grow m, slot: material slot, and shape or steps (a group)}. shape {type, location, rotation (deg), scale (uniform), mirror_x} plus: sphere radius; ellipsoid radii [x,y,z]; box size [x,y,z], round; capsule a, b, radius or radii [ra, rb]; torus major_radius, minor_radius, stretch [sx, sy]; cylinder radius, depth (along Z); half_space normal (removes nothing on its own; everything below the plane through location); chain points [[x,y,z]...], radius or radii per point (tubes, locks of hair). voxel_size sets detail: cells = volume / voxel_size^3, at most 64M. Example: {\"scene_id\":\"scn_1a2b3c4d\",\"name\":\"Pebble\",\"voxel_size\":0.01,\"steps\":[{\"shape\":{\"type\":\"ellipsoid\",\"radii\":[0.3,0.2,0.12]}},{\"blend\":0.05,\"shape\":{\"type\":\"capsule\",\"a\":[0,0,0.1],\"b\":[0,0,0.3],\"radius\":0.04}},{\"op\":\"subtract\",\"blend\":0.02,\"shape\":{\"type\":\"sphere\",\"radius\":0.08,\"location\":[0.2,0,0.1]}}]}.",
+        .params = common.mutating(&.{
+            common.name,
+            .{ .name = "steps", .type = .{ .objects = .{ .max_items = 4096 } }, .doc = "Shapes and groups, in order", .required = true },
+            .{ .name = "voxel_size", .type = .{ .number = .{ .min = 0.0001, .max = 100, .unit = .metres } }, .doc = "Grid spacing", .default = .{ .number = 0.02 } },
+            .{ .name = "bounds_min", .type = .{ .vec3 = .{ .min = -1e6, .max = 1e6, .unit = .metres } }, .doc = "Sampled box; default: the added shapes" },
+            .{ .name = "bounds_max", .type = .{ .vec3 = .{ .min = -1e6, .max = 1e6, .unit = .metres } }, .doc = "Sampled box" },
+            .{ .name = "smooth_iterations", .type = .{ .integer = .{ .min = 0, .max = 50 } }, .doc = "Volume-keeping smoothing passes", .default = .{ .integer = 0 } },
+            material_param,
+            common.location,
+            common.rotation,
+            common.scale,
+        }),
+        .kind = .mutating,
+        .handler = fromSdf,
+    },
+};
+
+pub const max_shapes = 20_000;
+pub const max_chain_points = 200_000;
+const max_depth = 8;
+
+fn fromSdf(c: *Call) HandlerError!void {
+    const a = c.args;
+    var parser: Parser = .{ .c = c };
+    const steps = try parser.steps(a.value("steps").?.array.items, "/steps", 0);
+    const lo = a.vec3("bounds_min");
+    const hi = a.vec3("bounds_max");
+    if ((lo == null) != (hi == null)) return c.failAt(.invalid_argument, if (lo == null) "/bounds_min" else "/bounds_max", "give both bounds or neither", &.{}, "only one bound is set", .{});
+    if (lo != null) for (0..3) |k| if (!(hi.?[k] > lo.?[k]))
+        return c.failAt(.invalid_argument, "/bounds_max", "", &.{}, "bounds_max must exceed bounds_min on every axis", .{});
+    const gpa = c.doc().gpa;
+    var mesh = sdf.mesh(gpa, steps, .{
+        .voxel = a.float("voxel_size").?,
+        .bounds = if (lo) |l| .{ l, hi.? } else null,
+        .smooth_iterations = @intCast(a.int("smooth_iterations").?),
+        .pool = c.server.pool,
+    }) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.DeadlineExceeded => error.ToolFailed,
+        error.TooManyCells => c.failAt(.invalid_argument, "/voxel_size", "raise voxel_size, or set bounds_min/bounds_max to the part that matters", &.{}, "the grid would exceed 64M cells", .{}),
+        error.Unbounded => c.failAt(.invalid_argument, "/steps", "a half_space is infinite: add it with bounds_min/bounds_max, or subtract it from a bounded shape", &.{}, "an added shape has no bounds", .{}),
+        error.Empty => c.failAt(.invalid_argument, "/steps", "check that something is added inside the bounds and that subtractions leave a solid", &.{}, "the program has no surface", .{}),
+        else => c.fail(.invalid_argument, "invalid SDF program", .{}),
+    };
+    c.spendTriangles(2 * @as(u64, mesh.faceCount())) catch |e| {
+        mesh.releaseRefs(gpa);
+        return e;
+    };
+    try addMeshObject(c, mesh, "SDF");
+}
+
+/// Reads the step program, reporting the JSON path of the first problem.
+const Parser = struct {
+    c: *Call,
+    shapes: usize = 0,
+    points: usize = 0,
+
+    fn at(p: *Parser, path: []const u8, key: []const u8) HandlerError![]const u8 {
+        return std.fmt.allocPrint(p.c.arena, "{s}/{s}", .{ path, key });
+    }
+
+    fn bad(p: *Parser, path: []const u8, hint: []const u8, comptime fmt: []const u8, args: anytype) HandlerError {
+        return p.c.failAt(.invalid_argument, path, hint, &.{}, fmt, args);
+    }
+
+    fn steps(p: *Parser, arr: []const Value, path: []const u8, depth: u32) HandlerError![]sdf.Step {
+        if (depth > max_depth) return p.bad(path, "flatten the program", "groups nest more than {d} deep", .{max_depth});
+        if (arr.len == 0) return p.bad(path, "", "a step list needs at least one step", .{});
+        const out = try p.c.arena.alloc(sdf.Step, arr.len);
+        for (arr, out, 0..) |item, *o, i| {
+            const sp = try std.fmt.allocPrint(p.c.arena, "{s}/{d}", .{ path, i });
+            if (item != .object) return p.bad(sp, "", "a step must be an object", .{});
+            o.* = try p.step(item.object, sp, depth);
+        }
+        return out;
+    }
+
+    fn step(p: *Parser, o: ObjectMap, path: []const u8, depth: u32) HandlerError!sdf.Step {
+        try p.onlyKeys(o, path, &.{ "op", "blend", "offset", "slot", "shape", "steps" });
+        var st: sdf.Step = .{ .body = undefined };
+        if (o.get("op")) |op| {
+            st.op = (if (op == .string) std.meta.stringToEnum(sdf.Op, op.string) else null) orelse
+                return p.c.failAt(.invalid_argument, try p.at(path, "op"), "", &.{ "add", "subtract", "intersect" }, "unknown op", .{});
+        }
+        st.blend = try p.num(o, "blend", path, 0, 0, 100);
+        st.offset = try p.num(o, "offset", path, 0, -100, 100);
+        if (o.get("slot") != null) st.slot = @intFromFloat(try p.num(o, "slot", path, 0, 0, 255));
+        const shape_v = o.get("shape");
+        const group = o.get("steps");
+        if ((shape_v == null) == (group == null)) return p.bad(path, "a step holds either a shape or a group of steps", "need exactly one of 'shape' and 'steps'", .{});
+        if (shape_v) |s| {
+            if (s != .object) return p.bad(try p.at(path, "shape"), "", "'shape' must be an object", .{});
+            st.body = .{ .shape = try p.shape(s.object, try p.at(path, "shape")) };
+        } else {
+            const g = group.?;
+            if (g != .array) return p.bad(try p.at(path, "steps"), "", "'steps' must be a list", .{});
+            st.body = .{ .group = try p.steps(g.array.items, try p.at(path, "steps"), depth + 1) };
+        }
+        return st;
+    }
+
+    const common_keys = [_][]const u8{ "type", "location", "rotation", "scale", "mirror_x" };
+
+    fn shape(p: *Parser, o: ObjectMap, path: []const u8) HandlerError!sdf.Shape {
+        p.shapes += 1;
+        if (p.shapes > max_shapes) return p.bad(path, "merge small shapes into chains", "more than {d} shapes", .{max_shapes});
+        const names = std.meta.fieldNames(sdf.Kind);
+        const tv = o.get("type") orelse return p.c.failAt(.invalid_argument, try p.at(path, "type"), "", names, "missing 'type'", .{});
+        const kind_tag = (if (tv == .string) std.meta.stringToEnum(std.meta.Tag(sdf.Kind), tv.string) else null) orelse
+            return p.c.failAt(.invalid_argument, try p.at(path, "type"), "", names, "unknown shape type", .{});
+        var s: sdf.Shape = .{ .kind = undefined };
+        s.location = try p.vec(o, "location", path, .{ 0, 0, 0 });
+        const r = try p.vec(o, "rotation", path, .{ 0, 0, 0 });
+        s.rotation = .{ math.vec.degToRad(r[0]), math.vec.degToRad(r[1]), math.vec.degToRad(r[2]) };
+        s.scale = try p.num(o, "scale", path, 1, 1e-6, 1e6);
+        if (o.get("mirror_x")) |m| s.mirror_x = m == .bool and m.bool;
+        switch (kind_tag) {
+            .sphere => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{"radius"}));
+                s.kind = .{ .sphere = .{ .radius = try p.num(o, "radius", path, null, 1e-6, 1e6) } };
+            },
+            .ellipsoid => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{"radii"}));
+                s.kind = .{ .ellipsoid = .{ .radii = try p.positiveVec(o, "radii", path) } };
+            },
+            .box => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{ "size", "round" }));
+                s.kind = .{ .box = .{ .half = math.vec.scale(try p.positiveVec(o, "size", path), 0.5), .round = try p.num(o, "round", path, 0, 0, 1e6) } };
+            },
+            .capsule => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{ "a", "b", "radius", "radii" }));
+                const ab = try p.pairRadii(o, path);
+                s.kind = .{ .capsule = .{ .a = try p.vec(o, "a", path, null), .b = try p.vec(o, "b", path, null), .ra = ab[0], .rb = ab[1] } };
+            },
+            .torus => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{ "major_radius", "minor_radius", "stretch" }));
+                var st: [2]f32 = .{ 1, 1 };
+                if (o.get("stretch")) |sv| {
+                    const items = if (sv == .array and sv.array.items.len == 2) sv.array.items else return p.bad(try p.at(path, "stretch"), "", "'stretch' must be [sx, sy]", .{});
+                    for (items, 0..) |x, k| st[k] = @floatCast(schema.number(x) orelse return p.bad(try p.at(path, "stretch"), "", "'stretch' must hold numbers", .{}));
+                    if (!(st[0] > 0 and st[1] > 0)) return p.bad(try p.at(path, "stretch"), "", "'stretch' must be positive", .{});
+                }
+                s.kind = .{ .torus = .{ .major = try p.num(o, "major_radius", path, null, 0, 1e6), .minor = try p.num(o, "minor_radius", path, null, 1e-6, 1e6), .sx = st[0], .sy = st[1] } };
+            },
+            .cylinder => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{ "radius", "depth" }));
+                s.kind = .{ .cylinder = .{ .radius = try p.num(o, "radius", path, null, 1e-6, 1e6), .half_height = try p.num(o, "depth", path, null, 1e-6, 1e6) / 2 } };
+            },
+            .half_space => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{"normal"}));
+                const n = try p.vec(o, "normal", path, null);
+                if (math.vec.length(n) < 1e-9) return p.bad(try p.at(path, "normal"), "", "'normal' must not be zero", .{});
+                s.kind = .{ .half_space = .{ .normal = math.vec.normalize(n) } };
+            },
+            .chain => {
+                try p.onlyKeys(o, path, &(common_keys ++ .{ "points", "radius", "radii" }));
+                s.kind = .{ .chain = try p.chain(o, path) };
+            },
+        }
+        return s;
+    }
+
+    fn chain(p: *Parser, o: ObjectMap, path: []const u8) HandlerError!@FieldType(sdf.Kind, "chain") {
+        const pv = o.get("points") orelse return p.bad(try p.at(path, "points"), "", "missing 'points'", .{});
+        const items = if (pv == .array) pv.array.items else return p.bad(try p.at(path, "points"), "", "'points' must be a list of [x, y, z]", .{});
+        if (items.len < 2) return p.bad(try p.at(path, "points"), "", "a chain needs at least 2 points", .{});
+        p.points += items.len;
+        if (p.points > max_chain_points) return p.bad(try p.at(path, "points"), "use fewer points per chain", "more than {d} chain points in all", .{max_chain_points});
+        const pts = try p.c.arena.alloc(math.Vec3, items.len);
+        for (items, pts, 0..) |item, *o_pt, i| o_pt.* = try p.point(item, try std.fmt.allocPrint(p.c.arena, "{s}/points/{d}", .{ path, i }));
+        const radii = try p.c.arena.alloc(f32, items.len);
+        if (o.get("radii")) |rv| {
+            const rs = if (rv == .array and rv.array.items.len == items.len) rv.array.items else return p.bad(try p.at(path, "radii"), "", "'radii' needs one radius per point ({d})", .{items.len});
+            for (rs, radii, 0..) |x, *r, i| {
+                const f = schema.number(x) orelse 0;
+                if (!(f > 0 and f <= 1e6)) return p.bad(try std.fmt.allocPrint(p.c.arena, "{s}/radii/{d}", .{ path, i }), "", "radii must be positive", .{});
+                r.* = @floatCast(f);
+            }
+        } else @memset(radii, try p.num(o, "radius", path, null, 1e-6, 1e6));
+        return .{ .points = pts, .radii = radii };
+    }
+
+    fn pairRadii(p: *Parser, o: ObjectMap, path: []const u8) HandlerError![2]f32 {
+        if (o.get("radii")) |rv| {
+            const rs = if (rv == .array and rv.array.items.len == 2) rv.array.items else return p.bad(try p.at(path, "radii"), "", "'radii' must be [ra, rb]", .{});
+            var out: [2]f32 = undefined;
+            for (rs, &out) |x, *r| {
+                const f = schema.number(x) orelse 0;
+                if (!(f > 0 and f <= 1e6)) return p.bad(try p.at(path, "radii"), "", "radii must be positive", .{});
+                r.* = @floatCast(f);
+            }
+            return out;
+        }
+        const r = try p.num(o, "radius", path, null, 1e-6, 1e6);
+        return .{ r, r };
+    }
+
+    fn onlyKeys(p: *Parser, o: ObjectMap, path: []const u8, allowed: []const []const u8) HandlerError!void {
+        var it = o.iterator();
+        outer: while (it.next()) |e| {
+            for (allowed) |k| if (std.mem.eql(u8, k, e.key_ptr.*)) continue :outer;
+            return p.c.failAt(.invalid_argument, try p.at(path, e.key_ptr.*), "", allowed, "unknown key '{s}'", .{e.key_ptr.*});
+        }
+    }
+
+    fn num(p: *Parser, o: ObjectMap, key: []const u8, path: []const u8, default: ?f32, min: f32, max: f32) HandlerError!f32 {
+        const val = o.get(key) orelse {
+            if (default) |d| return d;
+            return p.bad(try p.at(path, key), "", "missing '{s}'", .{key});
+        };
+        const x = schema.number(val) orelse return p.bad(try p.at(path, key), "", "'{s}' must be a number", .{key});
+        if (!(x >= min and x <= max)) return p.bad(try p.at(path, key), "", "'{s}' must be within {d} to {d}", .{ key, min, max });
+        return @floatCast(x);
+    }
+
+    fn point(p: *Parser, val: Value, path: []const u8) HandlerError!math.Vec3 {
+        const items = if (val == .array and val.array.items.len == 3) val.array.items else return p.bad(path, "", "expected [x, y, z]", .{});
+        var out: math.Vec3 = undefined;
+        for (items, &out) |x, *o| {
+            const f = schema.number(x) orelse return p.bad(path, "", "expected numbers", .{});
+            if (!(@abs(f) <= 1e6)) return p.bad(path, "", "coordinates must be finite, within 1e6", .{});
+            o.* = @floatCast(f);
+        }
+        return out;
+    }
+
+    fn vec(p: *Parser, o: ObjectMap, key: []const u8, path: []const u8, default: ?math.Vec3) HandlerError!math.Vec3 {
+        const val = o.get(key) orelse {
+            if (default) |d| return d;
+            return p.bad(try p.at(path, key), "", "missing '{s}'", .{key});
+        };
+        return p.point(val, try p.at(path, key));
+    }
+
+    fn positiveVec(p: *Parser, o: ObjectMap, key: []const u8, path: []const u8) HandlerError!math.Vec3 {
+        const x = try p.vec(o, key, path, null);
+        if (!(x[0] > 0 and x[1] > 0 and x[2] > 0)) return p.bad(try p.at(path, key), "", "'{s}' must be positive on every axis", .{key});
+        return x;
+    }
 };
 
 fn fromData(c: *Call) HandlerError!void {
