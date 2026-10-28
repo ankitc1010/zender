@@ -838,3 +838,15 @@ test "material.bake turns recipes into images that glTF carries as textures" {
     try testing.expectEqual(@as(f64, 1), schemaNumber(pbr.get("roughnessFactor").?));
     try testing.expect(gltf.object.get("materials").?.array.items[0].object.get("normalTexture") != null);
 }
+
+test "angle properties take degrees within their range" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const id = try f.createScene();
+    _ = try f.ok("object.add_primitive", try f.fmt("{{\"scene_id\":\"{s}\",\"kind\":\"cube\",\"name\":\"Box\"}}", .{id}));
+    // 30 degrees is well inside 0..180 (stored as radians).
+    _ = try f.ok("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"type\":\"bevel\",\"properties\":{{\"width\":0.05,\"angle_limit\":30}}}}", .{id}));
+    const over = try f.call("modifier.add", try f.fmt("{{\"scene_id\":\"{s}\",\"object\":\"Box\",\"type\":\"bevel\",\"properties\":{{\"angle_limit\":200}}}}", .{id}));
+    try testing.expectEqualStrings("/properties/angle_limit", over.tool_error.path);
+}

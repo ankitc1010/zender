@@ -190,11 +190,18 @@ fn numberOf(j: std.json.Value) ?f64 {
     };
 }
 
-fn checkRange(comptime p: Prop, x: f64, diag: *Diag) SetError!void {
-    if (!std.math.isFinite(x)) {
+/// A stored bound as agents see it (degrees for angles).
+fn agentBound(comptime p: Prop, x: f64) f64 {
+    return if (p.unit == .angle) @round(x * (180.0 / std.math.pi) * 1e4) / 1e4 else x;
+}
+
+fn checkRange(comptime p: Prop, x_agent: f64, diag: *Diag) SetError!void {
+    if (!std.math.isFinite(x_agent)) {
         diag.message = "value must be a finite number";
         return error.InvalidValue;
     }
+    // Bounds are in stored units (radians for angles); agents give degrees.
+    const x = if (p.unit == .angle) x_agent * (std.math.pi / 180.0) else x_agent;
     if (p.min) |lo| if (x < lo) {
         diag.message = "value below minimum";
         diag.hint = "see schema.describe for the valid range";
@@ -361,11 +368,11 @@ fn writePropSchema(comptime T: type, comptime p: Prop, w: *Stringify, with_defau
             try w.write("number");
             if (p.min) |lo| {
                 try w.objectField("minimum");
-                try writeBound(w, lo);
+                try writeBound(w, agentBound(p, lo));
             }
             if (p.max) |hi| {
                 try w.objectField("maximum");
-                try writeBound(w, hi);
+                try writeBound(w, agentBound(p, hi));
             }
             try w.endObject();
             try w.objectField("minItems");
@@ -377,11 +384,11 @@ fn writePropSchema(comptime T: type, comptime p: Prop, w: *Stringify, with_defau
     if (p.kind == .float or p.kind == .int) {
         if (p.min) |lo| {
             try w.objectField("minimum");
-            try writeBound(w, lo);
+            try writeBound(w, agentBound(p, lo));
         }
         if (p.max) |hi| {
             try w.objectField("maximum");
-            try writeBound(w, hi);
+            try writeBound(w, agentBound(p, hi));
         }
     }
     if (with_default) {
